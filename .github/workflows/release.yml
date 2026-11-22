@@ -1,0 +1,44 @@
+name: Release
+# Publishing a GitHub release (tag 0.1.0 or v0.1.0) publishes that version to Maven Central.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stheno is built with JDK 21: the enforcer in the parent pom fails the build on any other JDK.
+      - name: Setup Java and Apache Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+          cache: maven
+          server-id: central
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_CENTRAL_TOKEN
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Set release version from the tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: mvn -B -ntp versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+
+      # Tests run before anything is uploaded; nothing is published if one fails.
+      - name: Test
+        run: mvn -B -ntp verify
+
+      # All three modules and the parent pom are published. The tests already ran above.
+      - name: Publish to Maven Central
+        run: mvn -B -ntp clean deploy -Prelease -DskipTests
+        env:
+          MAVEN_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          MAVEN_CENTRAL_TOKEN: ${{ secrets.SONATYPE_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}

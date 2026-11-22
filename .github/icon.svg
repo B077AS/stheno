@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 1 120 120" width="256" height="256" role="img" aria-label="Stheno">
+  <title>Stheno</title>
+  <path d="M60 6L104 19V60C104 91 81 108 60 116C39 108 16 91 16 60V19Z" fill="#0d4a40"/>
+  <path d="M60 15L96 26V60C96 85 77 99 60 106C43 99 24 85 24 60V26Z" fill="#17806f"/>
+  <path d="M73.16 41.21A14 14 0 1 0 60 60A14 14 0 1 1 46.84 78.79" fill="none" stroke="#ffffff" stroke-width="13"/>
+</svg>
