@@ -2,6 +2,16 @@ package io.github.b077as.stheno.spring;
 
 import io.github.b077as.stheno.ap.AccessPointAcknowledger;
 import io.github.b077as.stheno.ap.PhossApClient;
+import io.github.b077as.stheno.delivery.DeliveryStore;
+import io.github.b077as.stheno.delivery.DeliveryTracker;
+import io.github.b077as.stheno.delivery.JdbcDeliveryStore;
+import io.github.b077as.stheno.spring.event.SthenoEvents;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.PayloadApplicationEvent;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import io.github.b077as.stheno.inbound.InMemoryReceivedMessageStore;
 import io.github.b077as.stheno.inbound.InboundDocument;
 import io.github.b077as.stheno.inbound.InboundOutcome;
@@ -79,6 +89,45 @@ class SthenoAutoConfigurationTest {
     void jdbcStoreWithoutDataSourceFailsClearly() {
         runner.withPropertyValues("stheno.inbound.store=jdbc")
                 .run(ctx -> assertThat(ctx).getFailure().hasStackTraceContaining("stheno.inbound.store=jdbc needs a DataSource bean"));
+    }
+
+    @Test
+    void deliveryTrackingIsOffByDefault() {
+        runner.run(ctx -> assertThat(ctx).doesNotHaveBean(DeliveryTracker.class));
+    }
+
+    @Test
+    void deliveryTrackingWithJdbc() {
+        runner.withUserConfiguration(DataSourceConfig.class)
+                .withPropertyValues("stheno.delivery.enabled=true", "stheno.delivery.store=jdbc")
+                .run(ctx -> {
+                    assertThat(ctx.getBean(DeliveryStore.class)).isInstanceOf(JdbcDeliveryStore.class);
+                    ctx.getBean(DeliveryTracker.class).track("sent-1", false);
+                    assertThat(ctx.getBean(DeliveryTracker.class).find("sent-1")).isPresent();
+                });
+    }
+
+    @Test
+    void overdueDocumentsArePublishedAsEvents() {
+        List<Object> events = new CopyOnWriteArrayList<>();
+        runner.withInitializer(c -> c.addApplicationListener((ApplicationListener<PayloadApplicationEvent<?>>) e ->
+                        events.add(e.getPayload())))
+                .withPropertyValues("stheno.delivery.enabled=true", "stheno.delivery.overdue-after=50ms",
+                        "stheno.delivery.check-interval=100ms")
+                .run(ctx -> {
+                    ctx.getBean(DeliveryTracker.class).track("sent-1", true);
+                    long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+                    while (events.stream().noneMatch(e -> e instanceof SthenoEvents.DeliveryOverdue)) {
+                        assertThat(System.nanoTime()).as("overdue event in time").isLessThan(deadline);
+                        Thread.onSpinWait();
+                    }
+                });
+    }
+
+    @Test
+    void retentionShorterThanTheOverdueTimeFailsClearly() {
+        runner.withPropertyValues("stheno.delivery.enabled=true", "stheno.delivery.retention=1h")
+                .run(ctx -> assertThat(ctx).getFailure().hasStackTraceContaining("must be longer than"));
     }
 
     @Test

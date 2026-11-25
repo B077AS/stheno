@@ -72,5 +72,20 @@ public class TestApplication {
         public void onEvent(SthenoEvents.RejectionNotDelivered event) {
             EVENTS.add(event);
         }
+
+        @EventListener
+        public void onEvent(SthenoEvents.DeliveryDecided event) {
+            EVENTS.add(event);
+        }
+
+        @EventListener
+        public void onEvent(SthenoEvents.MlsForUnknownDocument event) {
+            EVENTS.add(event);
+        }
+
+        @EventListener
+        public void onEvent(SthenoEvents.MlsIgnored event) {
+            EVENTS.add(event);
+        }
     }
 }

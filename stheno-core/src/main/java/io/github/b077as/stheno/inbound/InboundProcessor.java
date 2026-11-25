@@ -30,6 +30,7 @@ public final class InboundProcessor {
     private volatile InboundRouter router;
     private final List<InboundListener> listeners;
     private final UnhandledDocumentPolicy unhandled;
+    private final MlsHandler deliveryTracking;
 
     public InboundProcessor(ReceivedMessageStore store, InboundRouter router, List<InboundListener> listeners) {
         this(store, router, listeners, UnhandledDocumentPolicy.RETRY);
@@ -52,6 +53,23 @@ public final class InboundProcessor {
         this.routerSupplier = Objects.requireNonNull(router, "router");
         this.listeners = List.copyOf(listeners);
         this.unhandled = Objects.requireNonNull(unhandled, "unhandled");
+        this.deliveryTracking = null;
+    }
+
+    /**
+     * A processor like this one that also hands every received MLS to {@code tracking} (normally a {@code DeliveryTracker}), before
+     * the application's own MLS handler. If it fails, nothing is recorded and the Access Point delivers the MLS again.
+     */
+    public InboundProcessor withDeliveryTracking(MlsHandler tracking) {
+        return new InboundProcessor(this, Objects.requireNonNull(tracking, "tracking"));
+    }
+
+    private InboundProcessor(InboundProcessor base, MlsHandler tracking) {
+        this.store = base.store;
+        this.routerSupplier = base::getRouter;
+        this.listeners = base.listeners;
+        this.unhandled = base.unhandled;
+        this.deliveryTracking = tracking;
     }
 
     /** The router (built now if it was supplied lazily). */
@@ -178,9 +196,15 @@ public final class InboundProcessor {
 
     private HandlingResult handleMls(InboundDocument document) throws Exception {
         ReceivedMls mls = mlsReader.read(document);
+        if (deliveryTracking != null) {
+            deliveryTracking.handle(mls, document);
+        }
         MlsHandler handler = getRouter().getMlsHandler();
         if (handler == null) {
-            log.info("MLS {} for {} received, no MLS handler registered", mls.getResponseCode(), mls.getReferencedInstanceIdentifier());
+            if (deliveryTracking == null) {
+                log.info("MLS {} for {} received, no MLS handler registered", mls.getResponseCode(),
+                        mls.getReferencedInstanceIdentifier());
+            }
         } else {
             handler.handle(mls, document);
         }

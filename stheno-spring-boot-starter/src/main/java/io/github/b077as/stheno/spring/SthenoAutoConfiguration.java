@@ -2,6 +2,11 @@ package io.github.b077as.stheno.spring;
 
 import io.github.b077as.stheno.ap.AccessPointAcknowledger;
 import io.github.b077as.stheno.ap.PhossApClient;
+import io.github.b077as.stheno.delivery.DeliveryListener;
+import io.github.b077as.stheno.delivery.DeliveryStore;
+import io.github.b077as.stheno.delivery.DeliveryTracker;
+import io.github.b077as.stheno.delivery.InMemoryDeliveryStore;
+import io.github.b077as.stheno.delivery.JdbcDeliveryStore;
 import io.github.b077as.stheno.inbound.InMemoryReceivedMessageStore;
 import io.github.b077as.stheno.inbound.InboundListener;
 import io.github.b077as.stheno.inbound.InboundProcessor;
@@ -12,7 +17,9 @@ import io.github.b077as.stheno.inbound.UnhandledDocumentPolicy;
 import io.github.b077as.stheno.lookup.CachingPeppolLookup;
 import io.github.b077as.stheno.lookup.PeppolLookup;
 import io.github.b077as.stheno.lookup.SmpPeppolLookup;
+import io.github.b077as.stheno.spring.internal.DeliveryMonitor;
 import io.github.b077as.stheno.spring.internal.HandlerMethodRegistrar;
+import io.github.b077as.stheno.spring.internal.SpringEventDeliveryListener;
 import io.github.b077as.stheno.spring.internal.SpringEventInboundListener;
 import io.github.b077as.stheno.spring.internal.SthenoHealthIndicator;
 import io.github.b077as.stheno.spring.internal.SthenoMetrics;
@@ -90,12 +97,14 @@ public class SthenoAutoConfiguration {
     @ConditionalOnMissingBean
     public InboundProcessor sthenoInboundProcessor(ReceivedMessageStore store, HandlerMethodRegistrar registrar,
                                                    ObjectProvider<InboundRouter> userRouter, List<InboundListener> listeners,
-                                                   SthenoProperties properties) {
+                                                   SthenoProperties properties, ObjectProvider<DeliveryTracker> tracker) {
         // Built on first use: by then every bean with handler methods exists
-        return new InboundProcessor(store, () -> {
+        InboundProcessor processor = new InboundProcessor(store, () -> {
             InboundRouter custom = userRouter.getIfAvailable();
             return custom != null ? custom : registrar.buildRouter();
         }, new ArrayList<>(listeners), properties.getInbound().getUnhandledDocuments());
+        DeliveryTracker deliveries = tracker.getIfAvailable();
+        return deliveries == null ? processor : processor.withDeliveryTracking(deliveries);
     }
 
     /** Builds the router once all beans exist, so that a wrong handler setup fails the start, not the first document. */
@@ -173,6 +182,50 @@ public class SthenoAutoConfiguration {
         @ConditionalOnMissingBean(name = "sthenoHealthIndicator")
         SthenoHealthIndicator sthenoHealthIndicator(SthenoInboundService service, HandlerMethodRegistrar registrar, SthenoProperties properties) {
             return new SthenoHealthIndicator(service, registrar, properties);
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(prefix = "stheno.delivery", name = "enabled", havingValue = "true")
+    static class DeliveryTracking {
+
+        @Bean
+        @ConditionalOnMissingBean
+        DeliveryStore sthenoDeliveryStore(SthenoProperties properties, ObjectProvider<DataSource> dataSource) {
+            SthenoProperties.Delivery cfg = properties.getDelivery();
+            if (cfg.getStore() == SthenoProperties.Store.JDBC) {
+                DataSource ds = dataSource.getIfAvailable();
+                if (ds == null) {
+                    throw new IllegalStateException("stheno.delivery.store=jdbc needs a DataSource bean");
+                }
+                JdbcDeliveryStore store = new JdbcDeliveryStore(ds, cfg.getJdbcTable());
+                if (cfg.isJdbcCreateTable()) {
+                    store.createTablesIfMissing();
+                }
+                return store;
+            }
+            log.warn("Stheno follows sent documents in memory only: their status is lost on restart (stheno.delivery.store=jdbc)");
+            return new InMemoryDeliveryStore();
+        }
+
+        @Bean
+        @ConditionalOnMissingBean
+        DeliveryTracker sthenoDeliveryTracker(DeliveryStore store, SthenoProperties properties, ApplicationEventPublisher publisher,
+                                              ObjectProvider<DeliveryListener> userListeners) {
+            SthenoProperties.Delivery cfg = properties.getDelivery();
+            if (cfg.getRetention().compareTo(cfg.getOverdueAfter()) <= 0) {
+                throw new IllegalStateException("stheno.delivery.retention must be longer than stheno.delivery.overdue-after");
+            }
+            List<DeliveryListener> listeners = new ArrayList<>();
+            listeners.add(new SpringEventDeliveryListener(publisher));
+            userListeners.orderedStream().forEach(listeners::add);
+            return new DeliveryTracker(store, listeners, cfg.getOverdueAfter(), Clock.systemUTC());
+        }
+
+        @Bean
+        DeliveryMonitor sthenoDeliveryMonitor(DeliveryTracker tracker, DeliveryStore store, SthenoProperties properties) {
+            SthenoProperties.Delivery cfg = properties.getDelivery();
+            return new DeliveryMonitor(tracker, store, cfg.getRetention(), cfg.getCheckInterval());
         }
     }
 

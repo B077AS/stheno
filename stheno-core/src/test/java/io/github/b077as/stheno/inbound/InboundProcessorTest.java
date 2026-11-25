@@ -169,6 +169,21 @@ class InboundProcessorTest {
     }
 
     @Test
+    void receivedMlsDecidesAboutATrackedDocument() {
+        var tracker = new io.github.b077as.stheno.delivery.DeliveryTracker(
+                new io.github.b077as.stheno.delivery.InMemoryDeliveryStore(), List.of());
+        BuiltEnvelope sent = TestDocs.invoiceEnvelope("99999999-9999-9999-9999-999999999999");
+        tracker.track(sent);
+        assertThat(sent.isPositiveMlsRequested()).isFalse();
+
+        processor(InboundRouter.builder().build()).withDeliveryTracking(tracker)
+                .process(TestDocs.mlsEnvelope(sent.getInstanceIdentifier(), true).getXml(), null);
+
+        assertThat(tracker.statusOf(tracker.find(sent.getInstanceIdentifier()).orElseThrow()))
+                .isEqualTo(io.github.b077as.stheno.delivery.DeliveryStatus.REJECTED);
+    }
+
+    @Test
     void duplicateKeyIgnoresReceiverCase() {
         InboundDocument a = InboundDocument.builder().instanceIdentifier("x").receiverId("iso6523-actorid-upis::0088:ABC").build();
         InboundDocument b = InboundDocument.builder().instanceIdentifier("x").receiverId("0088:abc").build();

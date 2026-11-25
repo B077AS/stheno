@@ -32,7 +32,8 @@ checks and confirms**; it never transmits documents (it is not an Access Point a
   methods, background processing with retries.
 - **Acknowledgements to your Access Point** (each switchable): the receiver country for Peppol Reporting, and the Message Level
   Status verdict (`AP` / `AB` / `RE` with issues) from which the Access Point builds the MLS.
-- **MLS answers** to documents you sent, parsed, to your `@PeppolMlsHandler`.
+- **MLS answers** to documents you sent, parsed, to your `@PeppolMlsHandler`, and a [delivery tracker](#following-what-you-sent)
+  that turns them into the status of each document.
 - **Checks**: Peppol identifiers (also as Bean Validation annotations), document validation with the official rule sets, cached
   "can this participant receive this document?" lookups.
 - **Building**: Peppol envelopes (SBDH 2.0.2) and Invoice Responses (T111), to hand to your Access Point yourself.
@@ -119,6 +120,50 @@ disabled there, the verdict is switched off, or every attempt failed), Stheno lo
 sender may believe the document was delivered. (With inline sync forwarding and the verdict switched off, the rejection travels in the
 forwarding answer instead.)
 
+## Following what you sent
+
+The delivery tracker answers "what happened to the invoice I sent?". It sends nothing: you tell it which documents went out, and the
+MLS answers your Access Point forwards to the inbound endpoint do the rest (your Access Point has to forward them).
+
+```properties
+stheno.delivery.enabled=true
+stheno.delivery.store=jdbc          # memory (default) forgets everything on restart
+stheno.delivery.retention=90d       # how long a sent document is followed
+stheno.delivery.overdue-after=24h
+```
+
+```java
+// When you hand a document to your Access Point: the SBDH instance identifier of the envelope
+tracker.track(envelope);                    // an envelope you built yourself
+tracker.track(instanceIdentifier, false);   // or the identifier your Access Point gave you
+
+@EventListener
+void decided(SthenoEvents.DeliveryDecided event) {      // CONFIRMED, UNCONFIRMED or REJECTED
+    invoices.update(event.getDocument().getInstanceIdentifier(), event.getStatus(), event.getDocument().getMls().getIssues());
+}
+
+// Or ask at any time
+tracker.find(instanceIdentifier).map(tracker::statusOf);
+```
+
+| Status | Meaning |
+|---|---|
+| `NO_REJECTION` | No MLS, and only failures are reported: the normal case. Not a confirmation. |
+| `AWAITING` | A positive MLS was requested and has not arrived yet |
+| `OVERDUE` | Requested, but nothing after 24 hours: ask your Access Point |
+| `CONFIRMED` | `AP`: delivered, confirmed by the receiver's system |
+| `UNCONFIRMED` | `AB`: delivered towards the receiver, without confirmation |
+| `REJECTED` | `RE`: not delivered, with the reasons |
+
+- **Silence is normal.** Peppol reports only failures unless the document asks for a positive answer (`ALWAYS_SEND`). Pass `true` as
+  the second argument of `track` only if it really goes out that way; whether an envelope you built keeps that setting depends on
+  your Access Point.
+- A document keeps its **first** MLS; later ones are ignored (`MlsIgnored`).
+- An MLS that arrives before you registered its document is kept (`MlsForUnknownDocument`) and applied by `track`.
+- `OVERDUE` (`DeliveryOverdue`) is never a reason to send the document again by itself.
+- Events can come more than once: if your listener throws, the MLS is processed again. With background processing that happens
+  `handler-retry-attempts` times, so treat `find` as the source of truth.
+
 ## When processing is interrupted
 
 With background processing the Access Point gets its `200` before your handler runs, and the document is only held in memory. If the
@@ -184,9 +229,11 @@ a machine client) and protect it with the header above or your own rules. Use HT
 ## Events, metrics, health
 
 - Spring events (`SthenoEvents`): `DocumentReceived`, `DuplicateReceived`, `DocumentHandled`, `HandlerFailed`, `MlsReceived`,
-  `AccessPointAcknowledged`, `RejectionNotDelivered`, `DocumentsUnfinished`.
+  `AccessPointAcknowledged`, `RejectionNotDelivered`, `DocumentsUnfinished`; with delivery tracking `DeliveryDecided`,
+  `DeliveryOverdue`, `MlsForUnknownDocument`, `MlsIgnored`.
 - Micrometer: `stheno.inbound.received`, `stheno.inbound.duplicates`, `stheno.inbound.handled{outcome}`,
-  `stheno.inbound.handler.failures`, `stheno.ap.acknowledgements{result}`, `stheno.ap.rejections.undelivered`.
+  `stheno.inbound.handler.failures`, `stheno.ap.acknowledgements{result}`, `stheno.ap.rejections.undelivered`,
+  `stheno.delivery.decided{status}`, `stheno.delivery.overdue`, `stheno.delivery.mls.unknown`, `stheno.delivery.mls.ignored`.
 - Actuator health `stheno`: handlers, pending documents, switches, `consecutiveAcknowledgementFailures`.
 - Handlers run on virtual threads; define an `Executor` bean named `sthenoInboundExecutor` to use your own.
 

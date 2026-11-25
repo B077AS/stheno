@@ -287,7 +287,7 @@ public final class EnvelopeBuilder {
         if (xml == null) {
             throw new SthenoException(SthenoException.ErrorCode.INVALID_INPUT, "The envelope could not be serialised to XML");
         }
-        return new BuiltEnvelope(instanceId, xml);
+        return new BuiltEnvelope(instanceId, xml, mlsType == EPeppolMLSType.ALWAYS_SEND);
     }
 
     private static IParticipantIdentifier participant(String role, String value, List<String> problems) {

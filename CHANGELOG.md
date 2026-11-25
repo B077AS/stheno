@@ -6,6 +6,45 @@ they do.
 
 The latest version is the one on [Maven Central](https://central.sonatype.com/artifact/io.github.b077as/stheno-spring-boot-starter).
 
+## 0.2.0 - unreleased
+
+Message Level Status: the status of the documents you sent, and fixes to how received documents are confirmed or rejected.
+
+### Added
+- **Delivery tracking.** `DeliveryTracker` follows sent documents through their Message Level Status: the first MLS counts, silence
+  is normal unless a positive answer was requested, a requested answer that does not arrive is reported as overdue, and an MLS that
+  is faster than the registration is kept. `InMemoryDeliveryStore` and `JdbcDeliveryStore`; in the starter with
+  `stheno.delivery.enabled=true`, with the events `DeliveryDecided`, `DeliveryOverdue`, `MlsForUnknownDocument` and `MlsIgnored`,
+  and counters under `stheno.delivery.*`. `BuiltEnvelope` says whether a positive MLS was requested.
+- `RejectionNotDelivered` event and `stheno.ap.rejections.undelivered` counter: the Access Point did not take a rejection (an MLS
+  was already decided, MLS sending is disabled, the verdict is switched off, or every attempt failed), so the sender may believe the
+  document was delivered.
+- `stheno.inbound.processing-timeout` (default 10 minutes): documents left without a decision for longer are reported
+  (`DocumentsUnfinished` event, `ReceivedMessageStore.findUnfinished`).
+- `stheno.inbound.unhandled-documents` (`retry` / `reject`, core: `UnhandledDocumentPolicy`).
+
+### Changed
+Check these when upgrading from 0.1.0. The table of the JDBC received message store is unchanged.
+- A document no handler takes is no longer rejected (`RE`, reason `FD`): it is not taken over and answered `503`, so that the Access
+  Point delivers it again. `InboundProcessor.receive` throws `NO_HANDLER`. For the old behaviour set
+  `stheno.inbound.unhandled-documents=reject`.
+- A duplicate of a document that has no decision yet is answered `503` instead of `200`.
+- The JDBC store lets a new delivery take over a document left without a decision longer than the processing timeout. Set the timeout
+  longer than your slowest handler.
+- `InboundOutcome.rejected` refuses a rejection made of warnings (`BW`) only, as MLS requires.
+- `Acknowledgement` has a new field `rejectionNotDelivered` and `BuiltEnvelope` a new field `positiveMlsRequested` (their
+  constructors changed). `SthenoException.ErrorCode` has the new value `NO_HANDLER`.
+
+### Fixed
+- Documents could be lost with the JDBC store: after the application stopped during a handling, a new delivery was answered as a
+  duplicate and never handled.
+- A document stayed registered as being handled, or was forgotten without a trace, when a handler threw an `Error`, when the
+  executor refused the task, or when the application stopped while a retry was waiting.
+- A rejection that came too late for the Access Point was only logged as information.
+- Retrying a failed acknowledgement repeated the call that had already succeeded.
+- The README example rejected a document for a business reason. An MLS rejection is only for technical faults; answer business
+  objections with an Invoice Response.
+
 ## 0.1.0 - 2026-11-22
 
 First release.
@@ -21,12 +60,9 @@ First release.
 - **Inbound processing.** `InboundProcessor` receives a document in two steps (`receive`, `handle`), detects duplicates by envelope
   instance id and receiver, and routes to `InboundHandler`s by document type. A handler that throws leaves nothing recorded, so the
   Access Point's retry reaches it again. `InMemoryReceivedMessageStore` and `JdbcReceivedMessageStore` (plain JDBC, safe across
-  nodes). Received Message Level Status documents go to an `MlsHandler` through `MlsReader`. A document no handler takes is not
-  taken over (or rejected, if configured). A delivery of a document that is still undecided is not confirmed, and the JDBC store
-  lets a new delivery take over one left unfinished longer than the processing timeout.
+  nodes). Received Message Level Status documents go to an `MlsHandler` through `MlsReader`.
 - **Acknowledgements to your Access Point**, each with its own switch: the receiver country for Peppol Reporting and the MLS
-  verdict (`AP` / `AB` / `RE` with issues), written for phoss-ap 0.13+ (`/api/inbound/report`, `/api/mls/send`). A rejection the
-  Access Point does not take is reported, and a rejection made of warnings only is refused.
+  verdict (`AP` / `AB` / `RE` with issues), written for phoss-ap 0.13+ (`/api/inbound/report`, `/api/mls/send`).
 - **Lookups.** `PeppolLookup` with `SmpPeppolLookup` (SML and SMP over DNS and HTTPS, with the OpenPeppol trust store) and
   `CachingPeppolLookup`. Network errors are never cached.
 - **Validation.** `DocumentValidator` validates with the official rule sets through phive, picks the rule set with ddd, and

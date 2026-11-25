@@ -17,6 +17,8 @@ import org.springframework.context.event.EventListener;
  * <li>{@code stheno.inbound.handler.failures} (tag {@code giving_up})</li>
  * <li>{@code stheno.ap.acknowledgements} (tag {@code result}: {@code ok} / {@code failed})</li>
  * <li>{@code stheno.ap.rejections.undelivered}</li>
+ * <li>delivery tracking: {@code stheno.delivery.decided} (tag {@code status}), {@code stheno.delivery.overdue},
+ * {@code stheno.delivery.mls.unknown}, {@code stheno.delivery.mls.ignored} (counted again when an event is published again)</li>
  * </ul>
  * Document types are not used as tags (unbounded cardinality).
  */
@@ -52,6 +54,26 @@ public class SthenoMetrics implements InboundListener {
     @EventListener
     public void onRejectionNotDelivered(SthenoEvents.RejectionNotDelivered event) {
         registry.counter("stheno.ap.rejections.undelivered").increment();
+    }
+
+    @EventListener
+    public void onDeliveryDecided(SthenoEvents.DeliveryDecided event) {
+        registry.counter("stheno.delivery.decided", "status", event.getStatus().name()).increment();
+    }
+
+    @EventListener
+    public void onDeliveryOverdue(SthenoEvents.DeliveryOverdue event) {
+        registry.counter("stheno.delivery.overdue").increment();
+    }
+
+    @EventListener
+    public void onUnknownDocument(SthenoEvents.MlsForUnknownDocument event) {
+        registry.counter("stheno.delivery.mls.unknown").increment();
+    }
+
+    @EventListener
+    public void onMlsIgnored(SthenoEvents.MlsIgnored event) {
+        registry.counter("stheno.delivery.mls.ignored").increment();
     }
 
     @EventListener

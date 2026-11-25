@@ -33,6 +33,11 @@ import java.util.List;
  * stheno.lookup.enabled=false                         # needs peppol-smp-client
  * stheno.lookup.network=production                    # production | test
  *
+ * stheno.delivery.enabled=false                       # follow sent documents through their MLS (DeliveryTracker)
+ * stheno.delivery.store=memory                        # memory | jdbc
+ * stheno.delivery.retention=90d
+ * stheno.delivery.overdue-after=24h                   # only for documents that asked for a positive MLS
+ *
  * stheno.validation.enabled=false                     # needs phive-xml, phive-rules-peppol, ddd
  * stheno.validation.warm-up=eu.peppol.bis3:invoice:latest
  * </pre>
@@ -46,6 +51,7 @@ public class SthenoProperties {
     private AccessPoint accessPoint = new AccessPoint();
     private Lookup lookup = new Lookup();
     private Validation validation = new Validation();
+    private Delivery delivery = new Delivery();
 
     /** How the Access Point forwards documents (must match phoss-ap's {@code forwarding.mode}). */
     public enum ForwardingMode {
@@ -142,6 +148,25 @@ public class SthenoProperties {
         private Duration positiveTtl = Duration.ofHours(24);
         private Duration negativeTtl = Duration.ofMinutes(15);
         private int maxEntries = 10_000;
+    }
+
+    @Getter
+    @Setter
+    public static class Delivery {
+        /** Follow sent documents through their Message Level Status ({@code DeliveryTracker}). */
+        private boolean enabled = false;
+        /** {@code memory} forgets everything on restart; use {@code jdbc} (needs a DataSource bean) in production. */
+        private Store store = Store.MEMORY;
+        /** Table of the JDBC store; the issues go to the table with the same name followed by {@code _issue}. */
+        private String jdbcTable = "stheno_sent_document";
+        /** Create the JDBC tables at startup if they do not exist. */
+        private boolean jdbcCreateTable = true;
+        /** How long a sent document is followed. */
+        private Duration retention = Duration.ofDays(90);
+        /** When a requested positive MLS counts as overdue. */
+        private Duration overdueAfter = Duration.ofHours(24);
+        /** How often overdue documents are looked for and old records purged. */
+        private Duration checkInterval = Duration.ofMinutes(10);
     }
 
     @Getter

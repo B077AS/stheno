@@ -14,6 +14,8 @@ public class BuiltEnvelope {
     String instanceIdentifier;
     /** The complete XML of the envelope (UTF-8). Do not modify the array. */
     byte[] xml;
+    /** {@code true} if the envelope asks for a positive MLS too ({@code MLS_TYPE=ALWAYS_SEND}). */
+    boolean positiveMlsRequested;
 
     public String getXmlAsString() {
         return new String(xml, StandardCharsets.UTF_8);
