@@ -70,6 +70,25 @@ class JdbcReceivedMessageStoreTest {
     }
 
     @Test
+    void registrationLeftUnfinishedByACrashIsTakenOverByALaterDelivery() {
+        store.register(KEY);
+        clock.now = clock.now.plus(Duration.ofMinutes(9));
+        assertThat(store.register(KEY)).isPresent();
+        clock.now = clock.now.plus(Duration.ofMinutes(2));
+        assertThat(store.register(KEY)).isEmpty();
+        // The new owner holds it again for the full processing timeout
+        assertThat(store.register(KEY)).isPresent();
+    }
+
+    @Test
+    void completedMessageIsNeverTakenOver() {
+        store.register(KEY);
+        store.complete(KEY, InboundOutcome.accepted("DK"));
+        clock.now = clock.now.plus(Duration.ofDays(1));
+        assertThat(store.register(KEY)).isPresent();
+    }
+
+    @Test
     void concurrentRegistrationsLetExactlyOneWin() throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(8);
         try {

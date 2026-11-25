@@ -8,6 +8,7 @@ import io.github.b077as.stheno.inbound.InboundProcessor;
 import io.github.b077as.stheno.inbound.InboundRouter;
 import io.github.b077as.stheno.inbound.JdbcReceivedMessageStore;
 import io.github.b077as.stheno.inbound.ReceivedMessageStore;
+import io.github.b077as.stheno.inbound.UnhandledDocumentPolicy;
 import io.github.b077as.stheno.lookup.CachingPeppolLookup;
 import io.github.b077as.stheno.lookup.PeppolLookup;
 import io.github.b077as.stheno.lookup.SmpPeppolLookup;
@@ -35,6 +36,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import javax.sql.DataSource;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
@@ -69,7 +71,8 @@ public class SthenoAutoConfiguration {
             if (ds == null) {
                 throw new IllegalStateException("stheno.inbound.store=jdbc needs a DataSource bean");
             }
-            JdbcReceivedMessageStore store = new JdbcReceivedMessageStore(ds, cfg.getJdbcTable(), cfg.getDuplicateRetention());
+            JdbcReceivedMessageStore store = new JdbcReceivedMessageStore(ds, cfg.getJdbcTable(), cfg.getDuplicateRetention(),
+                    cfg.getProcessingTimeout(), Clock.systemUTC());
             if (cfg.isJdbcCreateTable()) {
                 store.createTableIfMissing();
             }
@@ -86,21 +89,25 @@ public class SthenoAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public InboundProcessor sthenoInboundProcessor(ReceivedMessageStore store, HandlerMethodRegistrar registrar,
-                                                   ObjectProvider<InboundRouter> userRouter, List<InboundListener> listeners) {
+                                                   ObjectProvider<InboundRouter> userRouter, List<InboundListener> listeners,
+                                                   SthenoProperties properties) {
         // Built on first use: by then every bean with handler methods exists
         return new InboundProcessor(store, () -> {
             InboundRouter custom = userRouter.getIfAvailable();
             return custom != null ? custom : registrar.buildRouter();
-        }, new ArrayList<>(listeners));
+        }, new ArrayList<>(listeners), properties.getInbound().getUnhandledDocuments());
     }
 
     /** Builds the router once all beans exist, so that a wrong handler setup fails the start, not the first document. */
     @Bean
-    public SmartInitializingSingleton sthenoRouterCheck(InboundProcessor processor, HandlerMethodRegistrar registrar) {
+    public SmartInitializingSingleton sthenoRouterCheck(InboundProcessor processor, HandlerMethodRegistrar registrar,
+                                                        SthenoProperties properties) {
         return () -> {
             processor.getRouter();
             if (registrar.getHandlerCount() == 0) {
-                log.warn("Stheno: no @PeppolInboundHandler method found; received business documents will be rejected");
+                log.warn("Stheno: no @PeppolInboundHandler method found; without an own InboundRouter, received business documents"
+                        + " are {}", properties.getInbound().getUnhandledDocuments() == UnhandledDocumentPolicy.REJECT
+                        ? "rejected" : "not taken over (503)");
             }
         };
     }

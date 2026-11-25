@@ -82,13 +82,13 @@ class PhossApClientTest {
 
     @Test
     void sendsTheMlsVerdictWithIssues() {
-        InboundOutcome rejected = InboundOutcome.rejected("Unknown buyer \"X\"",
-                List.of(MlsIssue.businessRule("cac:AccountingCustomerParty", "Unknown customer 12345")));
+        InboundOutcome rejected = InboundOutcome.rejected("Invalid element \"X\"",
+                List.of(MlsIssue.businessRule("cac:AccountingCustomerParty", "BR-07 violated")));
         assertThat(client.sendMlsVerdict("id-1", rejected)).isEqualTo(ApCallResult.DONE);
         assertThat(requests).singleElement().asString().contains("POST /api/mls/send token=secret body="
-                + "{\"sbdhInstanceID\":\"id-1\",\"responseCode\":\"RE\",\"responseText\":\"Unknown buyer \\\"X\\\"\","
+                + "{\"sbdhInstanceID\":\"id-1\",\"responseCode\":\"RE\",\"responseText\":\"Invalid element \\\"X\\\"\","
                 + "\"issues\":[{\"statusReasonCode\":\"BV\",\"errorField\":\"cac:AccountingCustomerParty\","
-                + "\"description\":\"Unknown customer 12345\"}]}");
+                + "\"description\":\"BR-07 violated\"}]}");
     }
 
     @Test
@@ -136,6 +136,38 @@ class PhossApClientTest {
         assertThat(ack.getReceiverCountry()).isEqualTo(ApCallResult.SKIPPED);
         assertThat(ack.getMlsVerdict()).isEqualTo(ApCallResult.FAILED);
         assertThat(ack.isFailed()).isTrue();
+    }
+
+    @Test
+    void rejectionTheAccessPointDoesNotTakeIsReported() {
+        AccessPointAcknowledger acknowledger = new AccessPointAcknowledger(client, true, true);
+        HandlingResult rejected = handled(InboundOutcome.rejected(MlsIssue.businessRule(null, "bad")));
+
+        assertThat(acknowledger.acknowledge(rejected, false).isRejectionNotDelivered()).isFalse();
+        mlsStatus.set(409);
+        assertThat(acknowledger.acknowledge(rejected, false).isRejectionNotDelivered()).isTrue();
+        mlsStatus.set(503);
+        assertThat(acknowledger.acknowledge(rejected, false).isRejectionNotDelivered()).isTrue();
+        assertThat(new AccessPointAcknowledger(client, true, false).acknowledge(rejected, false).isRejectionNotDelivered()).isTrue();
+
+        mlsStatus.set(409);
+        assertThat(acknowledger.acknowledge(handled(InboundOutcome.accepted(null)), false).isRejectionNotDelivered()).isFalse();
+    }
+
+    @Test
+    void retryRepeatsOnlyTheFailedCall() {
+        AccessPointAcknowledger acknowledger = new AccessPointAcknowledger(client, true, true);
+        HandlingResult accepted = handled(InboundOutcome.accepted("DK"));
+        reportStatus.set(500);
+        Acknowledgement first = acknowledger.acknowledge(accepted, false);
+        assertThat(first.getReceiverCountry()).isEqualTo(ApCallResult.FAILED);
+
+        requests.clear();
+        reportStatus.set(200);
+        Acknowledgement second = acknowledger.acknowledge(accepted, false, first);
+        assertThat(second.getReceiverCountry()).isEqualTo(ApCallResult.DONE);
+        assertThat(second.getMlsVerdict()).isEqualTo(ApCallResult.DONE);
+        assertThat(requests).singleElement().asString().contains("/api/inbound/report");
     }
 
     @Test

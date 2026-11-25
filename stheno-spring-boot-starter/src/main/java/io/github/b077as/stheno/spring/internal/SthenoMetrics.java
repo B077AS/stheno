@@ -16,6 +16,7 @@ import org.springframework.context.event.EventListener;
  * <li>{@code stheno.inbound.handled} (tag {@code outcome}: {@code AP} / {@code AB} / {@code RE} / {@code MLS})</li>
  * <li>{@code stheno.inbound.handler.failures} (tag {@code giving_up})</li>
  * <li>{@code stheno.ap.acknowledgements} (tag {@code result}: {@code ok} / {@code failed})</li>
+ * <li>{@code stheno.ap.rejections.undelivered}</li>
  * </ul>
  * Document types are not used as tags (unbounded cardinality).
  */
@@ -46,6 +47,11 @@ public class SthenoMetrics implements InboundListener {
     @EventListener
     public void onHandlerFailed(SthenoEvents.HandlerFailed event) {
         registry.counter("stheno.inbound.handler.failures", "giving_up", Boolean.toString(event.isGivingUp())).increment();
+    }
+
+    @EventListener
+    public void onRejectionNotDelivered(SthenoEvents.RejectionNotDelivered event) {
+        registry.counter("stheno.ap.rejections.undelivered").increment();
     }
 
     @EventListener

@@ -43,23 +43,35 @@ public final class AccessPointAcknowledger {
      *                           forwarding answer), so it is not reported again
      */
     public Acknowledgement acknowledge(HandlingResult result, boolean countryAlreadySent) {
+        return acknowledge(result, countryAlreadySent, null);
+    }
+
+    /**
+     * Like {@link #acknowledge(HandlingResult, boolean)}, for a retry: only the calls that failed in the previous attempt are made
+     * again, the others keep their result.
+     *
+     * @param previous result of the previous attempt, or {@code null} for the first one
+     */
+    public Acknowledgement acknowledge(HandlingResult result, boolean countryAlreadySent, Acknowledgement previous) {
         if (!result.isAcknowledgeable()) {
             return Acknowledgement.NOTHING;
         }
         String id = result.getDocument().getInstanceIdentifier();
         InboundOutcome outcome = result.getOutcome();
+        boolean rejected = outcome.getStatus() == InboundOutcome.Status.REJECTED;
 
-        ApCallResult country = ApCallResult.SKIPPED;
-        if (reportReceiverCountry && !countryAlreadySent && outcome.getReceiverCountry() != null
-                && outcome.getStatus() != InboundOutcome.Status.REJECTED) {
+        ApCallResult country = previous == null ? ApCallResult.SKIPPED : previous.getReceiverCountry();
+        if ((previous == null || country == ApCallResult.FAILED)
+                && reportReceiverCountry && !countryAlreadySent && outcome.getReceiverCountry() != null && !rejected) {
             country = call("receiver country", id, () -> client.reportReceiverCountry(id, outcome.getReceiverCountry()));
         }
 
-        ApCallResult mls = ApCallResult.SKIPPED;
-        if (sendMlsVerdict) {
+        ApCallResult mls = previous == null ? ApCallResult.SKIPPED : previous.getMlsVerdict();
+        if ((previous == null || mls == ApCallResult.FAILED) && sendMlsVerdict) {
             mls = call("MLS verdict " + outcome.getMlsResponseCode(), id, () -> client.sendMlsVerdict(id, outcome));
         }
-        return new Acknowledgement(country, mls);
+        boolean rejectionNotDelivered = rejected && mls != ApCallResult.DONE && mls != ApCallResult.FAILED;
+        return new Acknowledgement(country, mls, rejectionNotDelivered);
     }
 
     private static ApCallResult call(String what, String id, java.util.function.Supplier<ApCallResult> call) {

@@ -67,5 +67,10 @@ public class TestApplication {
         public void onEvent(SthenoEvents.DuplicateReceived event) {
             EVENTS.add(event);
         }
+
+        @EventListener
+        public void onEvent(SthenoEvents.RejectionNotDelivered event) {
+            EVENTS.add(event);
+        }
     }
 }

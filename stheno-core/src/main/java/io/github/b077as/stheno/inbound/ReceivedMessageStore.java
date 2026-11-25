@@ -1,5 +1,7 @@
 package io.github.b077as.stheno.inbound;
 
+import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -26,4 +28,15 @@ public interface ReceivedMessageStore {
 
     /** Looks up a message. */
     Optional<ReceivedRecord> find(MessageKey key);
+
+    /**
+     * Messages registered longer ago than {@code olderThan} and still without a decision: a handler that is still running, or a
+     * handling that was lost (crash). The latter have to be delivered again by the Access Point. At most 100, oldest first.
+     * <p>
+     * A store shared by several processes, or surviving a restart, should also let {@link #register} succeed again for such a message
+     * after a processing timeout.
+     */
+    default List<ReceivedRecord> findUnfinished(Duration olderThan) {
+        return List.of();
+    }
 }

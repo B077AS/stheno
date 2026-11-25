@@ -1,5 +1,6 @@
 package io.github.b077as.stheno.spring;
 
+import io.github.b077as.stheno.inbound.UnhandledDocumentPolicy;
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -21,6 +22,8 @@ import java.util.List;
  * stheno.inbound.auth-header-value=Bearer secret
  * stheno.inbound.store=memory                         # memory | jdbc (needs a DataSource bean)
  * stheno.inbound.duplicate-retention=30d
+ * stheno.inbound.processing-timeout=10m               # undecided longer than this = lost: reported, can be delivered again
+ * stheno.inbound.unhandled-documents=retry            # retry | reject : business documents no handler takes
  *
  * stheno.access-point.base-url=https://ap.example.com # the application's own phoss-ap; nothing is acknowledged without it
  * stheno.access-point.token=...                       # phoss-ap phase4.api.requiredtoken
@@ -85,6 +88,16 @@ public class SthenoProperties {
         private boolean jdbcCreateTable = true;
         /** How long received messages are remembered; longer than the Access Point retries or replays. */
         private Duration duplicateRetention = Duration.ofDays(30);
+        /**
+         * After this time a document without a decision counts as lost: it is reported, and the JDBC store lets a new delivery take it
+         * over. Must be longer than the slowest handler.
+         */
+        private Duration processingTimeout = Duration.ofMinutes(10);
+        /**
+         * Business documents no handler takes: {@code retry} answers {@code 503} so that the Access Point delivers them again,
+         * {@code reject} rejects them (MLS {@code RE}, reason {@code FD}).
+         */
+        private UnhandledDocumentPolicy unhandledDocuments = UnhandledDocumentPolicy.RETRY;
         /** Background processing: how often a failing handler is retried before giving up. */
         private int handlerRetryAttempts = 3;
         private Duration handlerRetryDelay = Duration.ofMinutes(1);

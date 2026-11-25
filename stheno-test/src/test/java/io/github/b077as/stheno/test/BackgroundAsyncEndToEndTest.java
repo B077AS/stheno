@@ -1,6 +1,8 @@
 package io.github.b077as.stheno.test;
 
+import io.github.b077as.stheno.ap.ApCallResult;
 import io.github.b077as.stheno.envelope.BuiltEnvelope;
+import io.github.b077as.stheno.envelope.EnvelopeBuilder;
 import io.github.b077as.stheno.inbound.InboundOutcome;
 import io.github.b077as.stheno.inbound.MlsIssue;
 import io.github.b077as.stheno.inbound.VerificationResult;
@@ -18,7 +20,10 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.ApplicationContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.w3c.dom.Element;
 
+import javax.xml.parsers.DocumentBuilderFactory;
+import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -26,6 +31,8 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -106,6 +113,65 @@ class BackgroundAsyncEndToEndTest {
         assertThat(Handlers.INVOICES).hasSize(1);
         assertThat(AP.getMlsVerdicts()).hasSize(1);
         assertThat(Handlers.EVENTS).anyMatch(e -> e instanceof SthenoEvents.DuplicateReceived);
+    }
+
+    @Test
+    void duplicateIsNotConfirmedWhileTheFirstDeliveryIsUndecided() throws Exception {
+        CountDownLatch handlerMayFinish = new CountDownLatch(1);
+        Handlers.BEHAVIOUR.set(doc -> {
+            handlerMayFinish.await(10, TimeUnit.SECONDS);
+            return InboundOutcome.accepted("DK");
+        });
+        BuiltEnvelope env = FakeAccessPoint.sampleInvoiceEnvelope();
+        assertThat(AP.deliver(env).getStatus()).isEqualTo(200);
+        assertThat(AP.deliver(env).getStatus()).isEqualTo(503);
+
+        handlerMayFinish.countDown();
+        AP.awaitMlsVerdict(env.getInstanceIdentifier(), WAIT);
+        assertThat(AP.deliver(env).getStatus()).isEqualTo(200);
+        assertThat(Handlers.INVOICES).hasSize(1);
+    }
+
+    @Test
+    void documentWithoutHandlerIsLeftToTheAccessPoint() throws Exception {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        Element creditNoteRoot = factory.newDocumentBuilder()
+                .parse(new ByteArrayInputStream("<CreditNote xmlns=\"urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2\"/>"
+                        .getBytes(StandardCharsets.UTF_8)))
+                .getDocumentElement();
+        BuiltEnvelope creditNote = EnvelopeBuilder.create()
+                .sender(FakeAccessPoint.SAMPLE_SENDER)
+                .receiver(FakeAccessPoint.SAMPLE_RECEIVER)
+                .documentType("urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2::CreditNote##urn:cen.eu:en16931:2017"
+                        + "#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0::2.1")
+                .process(FakeAccessPoint.BIS3_BILLING_PROCESS)
+                .senderCountry("BE")
+                .payload(creditNoteRoot)
+                .build();
+        assertThat(AP.deliver(creditNote).getStatus()).isEqualTo(503);
+        // Nothing was remembered: the next delivery is not a duplicate
+        assertThat(AP.deliver(creditNote).getStatus()).isEqualTo(503);
+        assertThat(AP.noMlsVerdictWithin(creditNote.getInstanceIdentifier(), Duration.ofMillis(300))).isTrue();
+    }
+
+    @Test
+    void rejectionAfterTheAccessPointDecidedTheMlsIsReported() {
+        AP.respondToMlsVerdictWith(409);
+        Handlers.BEHAVIOUR.set(doc -> InboundOutcome.rejected(MlsIssue.businessRule(null, "BR-01 violated")));
+        Delivery d = AP.deliver(FakeAccessPoint.sampleInvoiceEnvelope());
+
+        long deadline = System.currentTimeMillis() + WAIT.toMillis();
+        while (System.currentTimeMillis() < deadline
+                && Handlers.EVENTS.stream().noneMatch(e -> e instanceof SthenoEvents.RejectionNotDelivered)) {
+            Thread.onSpinWait();
+        }
+        assertThat(Handlers.EVENTS).filteredOn(e -> e instanceof SthenoEvents.RejectionNotDelivered).singleElement()
+                .satisfies(e -> {
+                    SthenoEvents.RejectionNotDelivered event = (SthenoEvents.RejectionNotDelivered) e;
+                    assertThat(event.getDocument().getInstanceIdentifier()).isEqualTo(d.getInstanceIdentifier());
+                    assertThat(event.getMlsVerdict()).isEqualTo(ApCallResult.ALREADY_DONE);
+                });
     }
 
     @Test

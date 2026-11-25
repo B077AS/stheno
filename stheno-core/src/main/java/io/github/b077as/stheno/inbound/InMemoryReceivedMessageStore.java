@@ -3,6 +3,8 @@ package io.github.b077as.stheno.inbound;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -11,7 +13,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * {@link ReceivedMessageStore} in memory, for tests and single node applications. Entries older than the retention are dropped; the
- * retention must be longer than the Access Point keeps retrying or can replay a delivery. Content is lost on restart.
+ * retention must be longer than the Access Point keeps retrying or can replay a delivery. Content is lost on restart. There is no
+ * processing timeout: an unfinished registration is always one this process is still working on.
  */
 public final class InMemoryReceivedMessageStore implements ReceivedMessageStore {
 
@@ -60,6 +63,17 @@ public final class InMemoryReceivedMessageStore implements ReceivedMessageStore 
     public Optional<ReceivedRecord> find(MessageKey key) {
         ReceivedRecord rec = records.get(key);
         return rec == null || isExpired(rec, clock.instant()) ? Optional.empty() : Optional.of(rec);
+    }
+
+    @Override
+    public List<ReceivedRecord> findUnfinished(Duration olderThan) {
+        Instant now = clock.instant();
+        Instant cutoff = now.minus(olderThan);
+        return records.values().stream()
+                .filter(r -> !r.isCompleted() && !isExpired(r, now) && r.getReceivedAt().isBefore(cutoff))
+                .sorted(Comparator.comparing(ReceivedRecord::getReceivedAt))
+                .limit(100)
+                .toList();
     }
 
     /** Number of remembered messages (expired ones may still be counted until the next registration). */

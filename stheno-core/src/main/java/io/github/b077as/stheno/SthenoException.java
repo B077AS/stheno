@@ -35,6 +35,8 @@ public class SthenoException extends RuntimeException {
         /** No validation rule set is known for the document (or validation is not on the classpath). */
         VALIDATION_UNAVAILABLE,
         /** The received message store (e.g. the database) failed. */
-        STORE_FAILED
+        STORE_FAILED,
+        /** No handler takes the received document, so it was not taken over. */
+        NO_HANDLER
     }
 }

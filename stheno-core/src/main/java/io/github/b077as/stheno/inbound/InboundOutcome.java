@@ -26,7 +26,12 @@ public class InboundOutcome {
          * use {@link #ACCEPTED} once the document is stored.
          */
         ACKNOWLEDGED,
-        /** The application refuses the document (content problems): MLS {@code RE} with issues; the Access Point must not retry. */
+        /**
+         * The document is technically unacceptable (schema or rule violation, malformed or mismatching content) or can permanently not
+         * be processed: MLS {@code RE} with issues; the Access Point must not retry. MLS 1.1.0 section 2.2 lists the allowed reasons,
+         * and no others may be used. A business objection (unknown buyer, wrong price, no such order) is <b>not</b> one of them: accept
+         * the document and answer with an Invoice Response ({@code InvoiceResponseBuilder}).
+         */
         REJECTED
     }
 
@@ -50,11 +55,20 @@ public class InboundOutcome {
         return new InboundOutcome(Status.ACKNOWLEDGED, checkCountry(receiverCountry), List.of(), null);
     }
 
+    /**
+     * A technical rejection, see {@link Status#REJECTED}.
+     *
+     * @throws SthenoException {@code INVALID_INPUT} without issues, or with warnings ({@code BW}) only: warnings alone must not reject
+     */
     public static InboundOutcome rejected(String text, List<MlsIssue> issues) {
         Objects.requireNonNull(issues, "issues");
         if (issues.isEmpty()) {
             throw new SthenoException(SthenoException.ErrorCode.INVALID_INPUT,
                     "A rejection needs at least one issue (MLS requires line responses for the response code RE)");
+        }
+        if (issues.stream().allMatch(i -> i.getReason() == MlsIssue.Reason.BW)) {
+            throw new SthenoException(SthenoException.ErrorCode.INVALID_INPUT,
+                    "Warnings alone must not reject a document (MLS): accept it, or add the error that makes it unacceptable");
         }
         return new InboundOutcome(Status.REJECTED, null, List.copyOf(issues), text);
     }

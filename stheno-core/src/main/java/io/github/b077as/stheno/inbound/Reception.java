@@ -13,4 +13,12 @@ public class Reception {
     boolean duplicate;
     /** The earlier record for a duplicate (its outcome is {@code null} if the first delivery is still being handled). */
     ReceivedRecord previous;
+
+    /**
+     * {@code true} for a duplicate whose earlier delivery is not decided yet. Do not confirm it to the Access Point: if the first
+     * handling is lost (crash), a later delivery must still arrive.
+     */
+    public boolean isInProgress() {
+        return duplicate && previous != null && !previous.isCompleted();
+    }
 }

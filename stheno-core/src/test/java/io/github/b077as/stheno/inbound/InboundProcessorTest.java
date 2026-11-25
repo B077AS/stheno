@@ -86,8 +86,38 @@ class InboundProcessorTest {
     }
 
     @Test
-    void documentWithoutHandlerIsRejectedAsFailureOfDelivery() {
+    void documentWithoutHandlerIsNotTakenOver() {
         InboundProcessor processor = processor(InboundRouter.builder().build());
+        io.github.b077as.stheno.envelope.BuiltEnvelope env = TestDocs.invoiceEnvelope("77777777-7777-7777-7777-777777777777");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> processor.receive(env.getXml(), null))
+                .isInstanceOf(io.github.b077as.stheno.SthenoException.class)
+                .hasMessageContaining("No handler");
+        assertThat(store.size()).isZero();
+        assertThat(events).isEmpty();
+    }
+
+    @Test
+    void onlyWarningsCannotRejectADocument() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> InboundOutcome.rejected("warnings", List.of(MlsIssue.warning(null, "a warning"))))
+                .isInstanceOf(io.github.b077as.stheno.SthenoException.class);
+    }
+
+    @Test
+    void errorThrownByAHandlerReleasesTheMessage() {
+        InboundProcessor processor = processor(InboundRouter.builder().fallback(doc -> {
+            throw new StackOverflowError();
+        }).build());
+        BuiltEnvelope env = TestDocs.invoiceEnvelope("88888888-8888-8888-8888-888888888888");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> processor.process(env.getXml(), null))
+                .isInstanceOf(StackOverflowError.class);
+        assertThat(store.size()).isZero();
+    }
+
+    @Test
+    void documentWithoutHandlerIsRejectedAsFailureOfDelivery() {
+        InboundProcessor processor = new InboundProcessor(store, InboundRouter.builder().build(), List.of(recorder),
+                UnhandledDocumentPolicy.REJECT);
         HandlingResult result = processor.process(TestDocs.invoiceEnvelope("33333333-3333-3333-3333-333333333333").getXml(), null);
         assertThat(result.getOutcome().getStatus()).isEqualTo(InboundOutcome.Status.REJECTED);
         assertThat(result.getOutcome().getIssues()).singleElement()

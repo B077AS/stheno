@@ -21,9 +21,12 @@ First release.
 - **Inbound processing.** `InboundProcessor` receives a document in two steps (`receive`, `handle`), detects duplicates by envelope
   instance id and receiver, and routes to `InboundHandler`s by document type. A handler that throws leaves nothing recorded, so the
   Access Point's retry reaches it again. `InMemoryReceivedMessageStore` and `JdbcReceivedMessageStore` (plain JDBC, safe across
-  nodes). Received Message Level Status documents go to an `MlsHandler` through `MlsReader`.
+  nodes). Received Message Level Status documents go to an `MlsHandler` through `MlsReader`. A document no handler takes is not
+  taken over (or rejected, if configured). A delivery of a document that is still undecided is not confirmed, and the JDBC store
+  lets a new delivery take over one left unfinished longer than the processing timeout.
 - **Acknowledgements to your Access Point**, each with its own switch: the receiver country for Peppol Reporting and the MLS
-  verdict (`AP` / `AB` / `RE` with issues), written for phoss-ap 0.13+ (`/api/inbound/report`, `/api/mls/send`).
+  verdict (`AP` / `AB` / `RE` with issues), written for phoss-ap 0.13+ (`/api/inbound/report`, `/api/mls/send`). A rejection the
+  Access Point does not take is reported, and a rejection made of warnings only is refused.
 - **Lookups.** `PeppolLookup` with `SmpPeppolLookup` (SML and SMP over DNS and HTTPS, with the OpenPeppol trust store) and
   `CachingPeppolLookup`. Network errors are never cached.
 - **Validation.** `DocumentValidator` validates with the official rule sets through phive, picks the rule set with ddd, and

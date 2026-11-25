@@ -12,6 +12,7 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -33,14 +34,22 @@ import java.util.regex.Pattern;
  *   PRIMARY KEY (instance_id, receiver_id))
  * </pre>
  * Only what is needed to answer a duplicate delivery is kept (status and receiver country), not the MLS issues.
+ * <p>
+ * A registration still without a decision after the <b>processing timeout</b> counts as abandoned (the node crashed or was stopped):
+ * the next delivery of that message takes it over. The timeout must be longer than the slowest handler, or a delivery during a very
+ * long handling runs it a second time. The documents themselves are not stored, so the Access Point has to deliver them again.
  */
 public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
 
     private static final Pattern TABLE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_.]{0,127}");
 
+    /** Processing timeout used when none is given. */
+    public static final Duration DEFAULT_PROCESSING_TIMEOUT = Duration.ofMinutes(10);
+
     private final DataSource dataSource;
     private final String table;
     private final Duration retention;
+    private final Duration processingTimeout;
     private final Clock clock;
 
     public JdbcReceivedMessageStore(DataSource dataSource, String table, Duration retention) {
@@ -48,6 +57,14 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
     }
 
     public JdbcReceivedMessageStore(DataSource dataSource, String table, Duration retention, Clock clock) {
+        this(dataSource, table, retention, DEFAULT_PROCESSING_TIMEOUT, clock);
+    }
+
+    public JdbcReceivedMessageStore(DataSource dataSource, String table, Duration retention, Duration processingTimeout, Clock clock) {
+        if (processingTimeout == null || processingTimeout.isNegative() || processingTimeout.isZero()) {
+            throw new IllegalArgumentException("The processing timeout must be positive");
+        }
+        this.processingTimeout = processingTimeout;
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         if (table == null || !TABLE_NAME.matcher(table).matches()) {
             throw new IllegalArgumentException("Invalid table name '" + table + "'");
@@ -103,7 +120,7 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
                 if (isDuplicateKey(ex)) {
                     Optional<ReceivedRecord> existing = find(c, key);
                     if (existing.isPresent()) {
-                        return existing;
+                        return !existing.get().isCompleted() && takeOver(c, key, now) ? Optional.empty() : existing;
                     }
                 }
                 throw ex;
@@ -148,6 +165,40 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
             return find(c, key);
         } catch (SQLException ex) {
             throw failure("reading " + key, ex);
+        }
+    }
+
+    @Override
+    public List<ReceivedRecord> findUnfinished(Duration olderThan) {
+        Instant now = clock.instant();
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement st = c.prepareStatement("SELECT instance_id, receiver_id, received_at FROM " + table
+                     + " WHERE outcome_status IS NULL AND received_at < ? AND received_at >= ? ORDER BY received_at")) {
+            st.setMaxRows(100);
+            st.setTimestamp(1, Timestamp.from(now.minus(olderThan)));
+            st.setTimestamp(2, Timestamp.from(now.minus(retention)));
+            try (ResultSet rs = st.executeQuery()) {
+                List<ReceivedRecord> unfinished = new ArrayList<>();
+                while (rs.next()) {
+                    unfinished.add(new ReceivedRecord(new MessageKey(rs.getString(1), rs.getString(2)), rs.getTimestamp(3).toInstant(),
+                            null));
+                }
+                return unfinished;
+            }
+        } catch (SQLException ex) {
+            throw failure("looking for unfinished messages", ex);
+        }
+    }
+
+    /** Claims an abandoned registration. The condition is part of the update, so of several nodes only one succeeds. */
+    private boolean takeOver(Connection c, MessageKey key, Instant now) throws SQLException {
+        try (PreparedStatement st = c.prepareStatement("UPDATE " + table + " SET received_at = ?"
+                + " WHERE instance_id = ? AND receiver_id = ? AND outcome_status IS NULL AND received_at < ?")) {
+            st.setTimestamp(1, Timestamp.from(now));
+            st.setString(2, key.getInstanceIdentifier());
+            st.setString(3, key.getReceiverId());
+            st.setTimestamp(4, Timestamp.from(now.minus(processingTimeout)));
+            return st.executeUpdate() == 1;
         }
     }
 

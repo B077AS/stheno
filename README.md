@@ -81,12 +81,11 @@ class InvoiceInbox {
     @PeppolInboundHandler(documentType =
         "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2::Invoice##urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0::2.1")
     InboundOutcome invoice(InboundDocument doc) {
-        Element invoice = doc.getPayload().getXml();
-        if (!knownBuyer(invoice)) {
-            return InboundOutcome.rejected("Unknown buyer",
-                    List.of(MlsIssue.businessRule("/Invoice/cbc:BuyerReference", "Not one of our orders")));
+        ValidationReport report = validator.validate(doc);   // a DocumentValidator bean, stheno.validation.enabled=true
+        if (!report.isValid()) {
+            return InboundOutcome.rejected("Invalid invoice", report.toMlsIssues());   // technical fault: MLS RE
         }
-        store(invoice);                         // throw if you cannot store it now: it is retried
+        store(doc);                             // throw if you cannot store it now: it is retried
         return InboundOutcome.accepted("DK");   // receiver (C4) country for Peppol Reporting
     }
 
@@ -98,10 +97,38 @@ class InvoiceInbox {
 }
 ```
 
-- A handler without `documentType` takes everything else. A document no handler takes is rejected (`RE`, reason `FD`).
-- Return `rejected` for unacceptable content; **throw** for "not now" (database down): nothing is decided, the document is retried.
-- The same document delivered again (Access Point retry or replay) does not reach your handler a second time.
+- A handler without `documentType` takes everything else. A document no handler takes is not taken over (`503`), so that it arrives
+  again once the handler is deployed; `stheno.inbound.unhandled-documents=reject` rejects it instead (`RE`, reason `FD`).
+- Return `rejected` for a technically unacceptable document; **throw** for "not now" (database down): nothing is decided, the document
+  is retried.
+- A handled document delivered again (Access Point retry or replay) does not reach your handler a second time.
 - `doc.getDelivery().getVerificationResult()` tells what phoss-ap's own validation said, if it ran.
+
+### What you may reject
+
+An MLS rejection (`RE`) is only for technical faults. [MLS 1.1.0](https://docs.peppol.eu/edelivery/specs/mls/v1.1.0/mls/spec/)
+section 2.2 has a closed list of reasons, among them schema violations (`SV`), fatal business rule violations and malformed or
+mismatching content (`BV`), and a correct document that permanently cannot be passed on (`FD`). Warnings (`BW`) alone never reject, and
+Stheno refuses such a rejection.
+
+A **business objection** (unknown buyer, wrong price, no such order) is not an MLS rejection: accept the document and answer with an
+[Invoice Response](#checks-and-building-blocks).
+
+Only one MLS exists per document. If your rejection does not get through (phoss-ap already sent its fallback `AB`, MLS sending is
+disabled there, the verdict is switched off, or every attempt failed), Stheno logs an error and publishes `RejectionNotDelivered`: the
+sender may believe the document was delivered. (With inline sync forwarding and the verdict switched off, the rejection travels in the
+forwarding answer instead.)
+
+## When processing is interrupted
+
+With background processing the Access Point gets its `200` before your handler runs, and the document is only held in memory. If the
+application stops in between, Stheno cannot recover it by itself: **deliver it again at the Access Point** (replay).
+
+- With `stheno.inbound.store=jdbc`, a document without a decision for longer than `stheno.inbound.processing-timeout` counts as lost:
+  it is reported (log, `DocumentsUnfinished` event) and a new delivery is handled. Set the timeout longer than your slowest handler.
+- The memory store forgets everything on restart: a replay is handled, but nothing reports what was lost (a normal shutdown logs it).
+- If the Access Point must keep the responsibility until your handler is done, use `stheno.inbound.processing=inline` (keep the
+  handler fast: it runs inside the Peppol exchange).
 
 ## Configuration and the matching phoss-ap settings
 
@@ -113,6 +140,8 @@ stheno.inbound.auth-header-name=Authorization
 stheno.inbound.auth-header-value=Bearer change-me
 stheno.inbound.store=memory                   # memory | jdbc
 stheno.inbound.duplicate-retention=30d
+stheno.inbound.processing-timeout=10m         # undecided for longer = lost
+stheno.inbound.unhandled-documents=retry      # retry | reject
 
 stheno.access-point.base-url=https://ap.example.com
 stheno.access-point.token=change-me           # = phoss-ap phase4.api.requiredtoken
@@ -143,7 +172,9 @@ How Stheno answers the forwarding call:
 | inline, rejected, MLS verdict on | `200` + `RE` via API | `200` + `RE` via API |
 | inline, rejected, MLS verdict off | `200` | `200 {"retry":"none"}` (phoss-ap sends `RE` itself) |
 | inline, handler threw | `503` (phoss-ap retries) | `503` |
-| duplicate | `200` | `200` (same country as the first time) |
+| no handler for the document type | `503` | `503` |
+| duplicate of a handled document | `200` | `200` (same country as the first time) |
+| duplicate of a document not decided yet | `503` | `503` |
 | broken envelope | `400` | `200 {"retry":"none"}` |
 | wrong auth header / too large | `401` / `413` | `401` / `413` |
 
@@ -153,9 +184,9 @@ a machine client) and protect it with the header above or your own rules. Use HT
 ## Events, metrics, health
 
 - Spring events (`SthenoEvents`): `DocumentReceived`, `DuplicateReceived`, `DocumentHandled`, `HandlerFailed`, `MlsReceived`,
-  `AccessPointAcknowledged`.
+  `AccessPointAcknowledged`, `RejectionNotDelivered`, `DocumentsUnfinished`.
 - Micrometer: `stheno.inbound.received`, `stheno.inbound.duplicates`, `stheno.inbound.handled{outcome}`,
-  `stheno.inbound.handler.failures`, `stheno.ap.acknowledgements{result}`.
+  `stheno.inbound.handler.failures`, `stheno.ap.acknowledgements{result}`, `stheno.ap.rejections.undelivered`.
 - Actuator health `stheno`: handlers, pending documents, switches, `consecutiveAcknowledgementFailures`.
 - Handlers run on virtual threads; define an `Executor` bean named `sthenoInboundExecutor` to use your own.
 
@@ -172,7 +203,7 @@ c.canReceive();
 
 // Validation (stheno.validation.enabled=true, stheno.validation.warm-up=eu.peppol.bis3:invoice:latest)
 ValidationReport report = validator.validate(doc);
-if (!report.isValid()) return InboundOutcome.rejected("Invalid invoice", report.toMlsIssues());
+report.isValid();                                         // warnings never make a document invalid
 
 // Invoice Response (T111) in an envelope, to hand to your Access Point
 BuiltEnvelope reply = InvoiceResponseBuilder.create()

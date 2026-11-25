@@ -1,8 +1,10 @@
 package io.github.b077as.stheno.inbound;
 
+import io.github.b077as.stheno.SthenoException;
 import io.github.b077as.stheno.envelope.EnvelopeReader;
 import lombok.extern.slf4j.Slf4j;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -27,17 +29,29 @@ public final class InboundProcessor {
     private final Supplier<InboundRouter> routerSupplier;
     private volatile InboundRouter router;
     private final List<InboundListener> listeners;
+    private final UnhandledDocumentPolicy unhandled;
 
     public InboundProcessor(ReceivedMessageStore store, InboundRouter router, List<InboundListener> listeners) {
-        this(store, () -> router, listeners);
+        this(store, router, listeners, UnhandledDocumentPolicy.RETRY);
+    }
+
+    public InboundProcessor(ReceivedMessageStore store, InboundRouter router, List<InboundListener> listeners,
+                            UnhandledDocumentPolicy unhandled) {
+        this(store, () -> router, listeners, unhandled);
         Objects.requireNonNull(router, "router");
     }
 
     /** With a router that is built on first use (e.g. after all Spring beans with handler methods exist). */
     public InboundProcessor(ReceivedMessageStore store, Supplier<InboundRouter> router, List<InboundListener> listeners) {
+        this(store, router, listeners, UnhandledDocumentPolicy.RETRY);
+    }
+
+    public InboundProcessor(ReceivedMessageStore store, Supplier<InboundRouter> router, List<InboundListener> listeners,
+                            UnhandledDocumentPolicy unhandled) {
         this.store = Objects.requireNonNull(store, "store");
         this.routerSupplier = Objects.requireNonNull(router, "router");
         this.listeners = List.copyOf(listeners);
+        this.unhandled = Objects.requireNonNull(unhandled, "unhandled");
     }
 
     /** The router (built now if it was supplied lazily). */
@@ -58,7 +72,9 @@ public final class InboundProcessor {
     /**
      * Step 1: reads the envelope and registers the message.
      *
-     * @throws io.github.b077as.stheno.SthenoException {@code INVALID_ENVELOPE} if the bytes are no valid Peppol envelope
+     * @throws io.github.b077as.stheno.SthenoException {@code INVALID_ENVELOPE} if the bytes are no valid Peppol envelope;
+     *         {@code NO_HANDLER} if no handler takes the new business document and the policy is
+     *         {@link UnhandledDocumentPolicy#RETRY} (nothing is registered)
      */
     public Reception receive(byte[] envelope, DeliveryMetadata delivery) {
         InboundDocument document = reader.read(envelope, delivery);
@@ -70,9 +86,25 @@ public final class InboundProcessor {
             notifyListeners(l -> l.onDuplicate(reception));
             return reception;
         }
+        if (unhandled == UnhandledDocumentPolicy.RETRY && !document.isMessageLevelStatus()) {
+            requireHandler(document, key);
+        }
         log.info("Received {} ({})", key, document.getDocumentTypeId());
         notifyListeners(l -> l.onReceived(document));
         return new Reception(document, false, null);
+    }
+
+    /**
+     * Gives up a document that was received but will not be handled now (e.g. no thread could take it): it is forgotten, so that a new
+     * delivery of it is handled.
+     */
+    public void abandon(InboundDocument document) {
+        store.release(MessageKey.of(document));
+    }
+
+    /** The store's unfinished messages, see {@link ReceivedMessageStore#findUnfinished}. */
+    public List<ReceivedRecord> findUnfinished(Duration olderThan) {
+        return store.findUnfinished(olderThan);
     }
 
     /**
@@ -92,6 +124,10 @@ public final class InboundProcessor {
             HandlingResult result = new HandlingResult(HandlingResult.Status.FAILED, document, null, null, ex);
             notifyListeners(l -> l.onHandlerFailed(result));
             return result;
+        } catch (Error error) {
+            // Not turned into a result, but the message must not stay registered as "being handled"
+            store.release(key);
+            throw error;
         }
     }
 
@@ -108,6 +144,9 @@ public final class InboundProcessor {
     private HandlingResult handleBusinessDocument(InboundDocument document) throws Exception {
         InboundHandler handler = getRouter().findHandler(document);
         InboundOutcome outcome;
+        if (handler == null && unhandled == UnhandledDocumentPolicy.RETRY) {
+            throw new IllegalStateException("No handler for document type " + document.getDocumentTypeId());
+        }
         if (handler == null) {
             log.warn("No handler for document type {}: rejecting it", document.getDocumentTypeId());
             outcome = InboundOutcome.rejected(MlsIssue.deliveryFailure(
@@ -119,6 +158,22 @@ public final class InboundProcessor {
             }
         }
         return new HandlingResult(HandlingResult.Status.HANDLED, document, outcome, null, null);
+    }
+
+    /** Releases the registration again if no handler takes the document (or looking for one fails). */
+    private void requireHandler(InboundDocument document, MessageKey key) {
+        boolean found = false;
+        try {
+            found = getRouter().findHandler(document) != null;
+        } finally {
+            if (!found) {
+                store.release(key);
+            }
+        }
+        if (!found) {
+            throw new SthenoException(SthenoException.ErrorCode.NO_HANDLER, "No handler for document type "
+                    + document.getDocumentTypeId() + ": " + key + " is not taken over, the Access Point has to deliver it again");
+        }
     }
 
     private HandlingResult handleMls(InboundDocument document) throws Exception {
