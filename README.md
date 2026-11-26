@@ -214,6 +214,25 @@ tracker.find(instanceIdentifier).map(tracker::responsesTo).map(ResponseHistory::
 - A response that arrives before you registered its invoice is kept and applied by `track`.
 - The delivery status (MLS) and the invoice status (responses) are separate: neither changes the other.
 
+## Databases
+
+With `stheno.inbound.store=jdbc` and `stheno.delivery.store=jdbc` Stheno uses your primary `DataSource` bean and its pool. For another
+database, define your own `ReceivedMessageStore` or `DeliveryStore` bean.
+
+- **Stheno runs and commits its own transactions**, whatever the pool's auto-commit setting. It does not join yours: calling
+  `tracker.track` in a `@Transactional` method takes a second connection, and a rollback does not undo it. Size the pool for that.
+  Spring's `TransactionAwareDataSourceProxy` is bypassed. Another data source that hands out the connection of the current transaction
+  (e.g. a container managed one) is not supported.
+- `@Transactional` on a handler works as for any bean method (not `private`) and covers your own writes. Your transaction commits
+  before Stheno records the document as handled, so a crash in between runs the handler again: make it idempotent, e.g. with a unique
+  key on the instance identifier. Stheno's events are mostly published outside any transaction: use `@EventListener`, not
+  `@TransactionalEventListener`.
+- Missing tables are created at startup. With your own migrations (Flyway, Liquibase) set `stheno.inbound.jdbc-create-table=false` and
+  `stheno.delivery.jdbc-create-table=false`; the table definitions are in the Javadoc of `JdbcReceivedMessageStore` and
+  `JdbcDeliveryStore`.
+- Times are stored as UTC. Expired records are deleted regularly (`stheno.inbound.duplicate-retention`, `stheno.delivery.retention`).
+- Tested with H2, PostgreSQL 14 and MariaDB 10.11. MySQL, SQL Server and Oracle are not tested.
+
 ## When processing is interrupted
 
 With background processing the Access Point gets its `200` before your handler runs, and the document is only held in memory. If the

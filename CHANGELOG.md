@@ -18,7 +18,7 @@ or rejected.
 - **Invoice status.** The delivery tracker matches responses to sent invoices (`InvoiceReference`: participants, number, type code,
   date), keeps them all and derives the status in the order the BIS allows (`ResponseHistory`); responses out of sequence do not
   change it. Events `InvoiceResponseTracked`, `InvoiceResponseOutOfSequence` and `InvoiceResponseForUnknownInvoice`, counters under
-  `stheno.delivery.responses`. The JDBC delivery store has two more tables and, in its document table, the invoice columns.
+  `stheno.delivery.responses`.
 - `SthenoException.ErrorCode.INVALID_DOCUMENT`.
 - **Delivery tracking.** `DeliveryTracker` follows sent documents through their Message Level Status: the first MLS counts, silence
   is normal unless a positive answer was requested, a requested answer that does not arrive is reported as overdue, and an MLS that
@@ -33,7 +33,13 @@ or rejected.
 - `stheno.inbound.unhandled-documents` (`retry` / `reject`, core: `UnhandledDocumentPolicy`).
 
 ### Changed
-Check these when upgrading from 0.1.0. The table of the JDBC received message store is unchanged.
+Check these when upgrading from 0.1.0. The columns of the JDBC received message store are unchanged, so an existing table keeps
+working.
+- The JDBC store writes times as UTC; 0.1.0 wrote the local time of the JVM. Unless that was UTC, existing rows seem older or younger
+  by the difference, once: they may expire or count as unfinished that much earlier or later.
+- New tables use `DATETIME(6)` and `utf8mb4` on MySQL and MariaDB, `DATETIME2(6)` and `NVARCHAR` on SQL Server, and get an index on
+  `received_at`. Existing tables are not altered. On MySQL and MariaDB change an existing `received_at` to `DATETIME(6)`.
+- The starter deletes expired received messages itself (`ReceivedMessageStore.purgeExpired`).
 - A document no handler takes is no longer rejected (`RE`, reason `FD`): it is not taken over and answered `503`, so that the Access
   Point delivers it again. `InboundProcessor.receive` throws `NO_HANDLER`. For the old behaviour set
   `stheno.inbound.unhandled-documents=reject`.
@@ -45,6 +51,13 @@ Check these when upgrading from 0.1.0. The table of the JDBC received message st
   constructors changed). `SthenoException.ErrorCode` has the new value `NO_HANDLER`.
 
 ### Fixed
+- With a pool that has auto-commit switched off, the JDBC store saved nothing, so duplicates reached the handler again.
+- With Spring's `TransactionAwareDataSourceProxy`, the JDBC store worked inside the application's transaction.
+- The JDBC table of received messages grew without limit: expired rows were never deleted.
+- Nodes in different time zones, or the end of summer time, could make the JDBC store see a document as older than it was.
+- Creating the JDBC table failed at the second start when its name had a schema, was skipped when another schema had a table of that
+  name, and could fail when several nodes started together.
+- The automatically created table did not work on SQL Server, and on MySQL and MariaDB lost fractions of seconds.
 - Documents could be lost with the JDBC store: after the application stopped during a handling, a new delivery was answered as a
   duplicate and never handled.
 - A document stayed registered as being handled, or was forgotten without a trace, when a handler threw an `Error`, when the

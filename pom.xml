@@ -43,7 +43,6 @@
   </modules>
 
   <properties>
-    <!-- Java 21 target, built with JDK 21 (user decision 2026-11-15; phoss-ap is Java 21 too). The enforcer below checks the JDK. -->
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <lombok.version>1.18.48</lombok.version>
@@ -57,7 +56,6 @@
 
   <dependencyManagement>
     <dependencies>
-      <!-- JUnit first: the first import of a BOM wins, so Spring Boot's import in the starter cannot downgrade it. -->
       <dependency>
         <groupId>org.junit</groupId>
         <artifactId>junit-bom</artifactId>
@@ -65,7 +63,6 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
-      <!-- Helger families aligned on one release each (peppol-commons 13.2.3 requires ph-commons 12.7.1). Bump together. -->
       <dependency>
         <groupId>com.helger.peppol</groupId>
         <artifactId>peppol-commons-bom</artifactId>
@@ -80,7 +77,6 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
-      <!-- Same alignment as Envoy (audited 2026-11-14): the SMP client and phive pull ph-xsds / ph-web modules of different releases -->
       <dependency>
         <groupId>com.helger.xsd</groupId>
         <artifactId>ph-xsds-bom</artifactId>

@@ -76,7 +76,14 @@ public final class InMemoryReceivedMessageStore implements ReceivedMessageStore 
                 .toList();
     }
 
-    /** Number of remembered messages (expired ones may still be counted until the next registration). */
+    @Override
+    public int purgeExpired() {
+        int before = records.size();
+        purge(clock.instant());
+        return Math.max(0, before - records.size());
+    }
+
+    /** Number of remembered messages (expired ones may still be counted until the next registration or purge). */
     public int size() {
         return records.size();
     }

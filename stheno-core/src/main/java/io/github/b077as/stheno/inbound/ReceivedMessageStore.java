@@ -39,4 +39,14 @@ public interface ReceivedMessageStore {
     default List<ReceivedRecord> findUnfinished(Duration olderThan) {
         return List.of();
     }
+
+    /**
+     * Forgets the messages older than the store's retention, to be called regularly. A store that expires its entries by itself does
+     * nothing.
+     *
+     * @return the number of messages forgotten
+     */
+    default int purgeExpired() {
+        return 0;
+    }
 }

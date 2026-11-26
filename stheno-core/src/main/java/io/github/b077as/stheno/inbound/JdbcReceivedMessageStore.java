@@ -1,14 +1,13 @@
 package io.github.b077as.stheno.inbound;
 
 import io.github.b077as.stheno.SthenoException;
+import io.github.b077as.stheno.internal.JdbcSupport;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -18,22 +17,35 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
+import static io.github.b077as.stheno.internal.JdbcSupport.bind;
+import static io.github.b077as.stheno.internal.JdbcSupport.cut;
+import static io.github.b077as.stheno.internal.JdbcSupport.inTransaction;
+import static io.github.b077as.stheno.internal.JdbcSupport.instant;
+import static io.github.b077as.stheno.internal.JdbcSupport.isDuplicateKey;
+import static io.github.b077as.stheno.internal.JdbcSupport.update;
+
 /**
  * {@link ReceivedMessageStore} in a relational database, safe for applications running on several nodes: registration relies on the
  * primary key, so of two nodes receiving the same message only one wins. Plain JDBC, no framework needed.
+ * <p>
+ * The store runs its own short transactions and commits them, whatever the auto-commit setting of the pool. The data source must hand
+ * out connections of their own, not the one of a transaction the caller is in (the Spring Boot starter sees to that for Spring's
+ * transaction aware proxy).
  * <p>
  * Table (created by {@link #createTableIfMissing()} or by the application's own migrations):
  * <pre>
  * CREATE TABLE stheno_received_message (
  *   instance_id      VARCHAR(255) NOT NULL,
  *   receiver_id      VARCHAR(255) NOT NULL,
- *   received_at      TIMESTAMP    NOT NULL,
+ *   received_at      TIMESTAMP    NOT NULL,     -- MySQL, MariaDB: DATETIME(6); SQL Server: DATETIME2(6)
  *   outcome_status   VARCHAR(20),
  *   receiver_country VARCHAR(2),
- *   outcome_text     VARCHAR(2000),
+ *   outcome_text     VARCHAR(2000),             -- SQL Server: NVARCHAR
  *   PRIMARY KEY (instance_id, receiver_id))
+ * CREATE INDEX stheno_received_message_at ON stheno_received_message (received_at)
  * </pre>
- * Only what is needed to answer a duplicate delivery is kept (status and receiver country), not the MLS issues.
+ * Times are stored as UTC. Only what is needed to answer a duplicate delivery is kept (status and receiver country), not the MLS
+ * issues.
  * <p>
  * A registration still without a decision after the <b>processing timeout</b> counts as abandoned (the node crashed or was stopped):
  * the next delivery of that message takes it over. The timeout must be longer than the slowest handler, or a delivery during a very
@@ -42,6 +54,7 @@ import java.util.regex.Pattern;
 public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
 
     private static final Pattern TABLE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_.]{0,127}");
+    private static final int REGISTER_ATTEMPTS = 3;
 
     /** Processing timeout used when none is given. */
     public static final Duration DEFAULT_PROCESSING_TIMEOUT = Duration.ofMinutes(10);
@@ -77,21 +90,14 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    /** Creates the table if it does not exist (standard SQL; use own migrations for special databases). */
+    /** Creates the table if it does not exist (use own migrations for databases it does not suit). */
     public void createTableIfMissing() {
-        try (Connection c = dataSource.getConnection()) {
-            try (ResultSet rs = c.getMetaData().getTables(null, null, null, new String[] {"TABLE"})) {
-                while (rs.next()) {
-                    if (table.equalsIgnoreCase(rs.getString("TABLE_NAME"))) {
-                        return;
-                    }
-                }
-            }
-            try (Statement st = c.createStatement()) {
-                st.executeUpdate("CREATE TABLE " + table + " (instance_id VARCHAR(255) NOT NULL, receiver_id VARCHAR(255) NOT NULL, "
-                        + "received_at TIMESTAMP NOT NULL, outcome_status VARCHAR(20), receiver_country VARCHAR(2), "
-                        + "outcome_text VARCHAR(2000), PRIMARY KEY (instance_id, receiver_id))");
-            }
+        try {
+            JdbcSupport.createTableIfMissing(dataSource, table,
+                    "instance_id VARCHAR(255) NOT NULL, receiver_id VARCHAR(255) NOT NULL, received_at <timestamp> NOT NULL, "
+                            + "outcome_status VARCHAR(20), receiver_country VARCHAR(2), outcome_text <text>(2000), "
+                            + "PRIMARY KEY (instance_id, receiver_id)",
+                    "CREATE INDEX " + table.replace('.', '_') + "_at ON " + table + " (received_at)");
         } catch (SQLException ex) {
             throw failure("creating table " + table, ex);
         }
@@ -99,31 +105,27 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
 
     @Override
     public Optional<ReceivedRecord> register(MessageKey key) {
-        Instant now = clock.instant();
-        try (Connection c = dataSource.getConnection()) {
-            // Expired entries of this key are removed first, so that a delivery after the retention counts as new
-            try (PreparedStatement del = c.prepareStatement("DELETE FROM " + table
-                    + " WHERE instance_id = ? AND receiver_id = ? AND received_at < ?")) {
-                del.setString(1, key.getInstanceIdentifier());
-                del.setString(2, key.getReceiverId());
-                del.setTimestamp(3, Timestamp.from(now.minus(retention)));
-                del.executeUpdate();
-            }
-            try (PreparedStatement ins = c.prepareStatement("INSERT INTO " + table
-                    + " (instance_id, receiver_id, received_at) VALUES (?, ?, ?)")) {
-                ins.setString(1, key.getInstanceIdentifier());
-                ins.setString(2, key.getReceiverId());
-                ins.setTimestamp(3, Timestamp.from(now));
-                ins.executeUpdate();
-                return Optional.empty();
-            } catch (SQLException ex) {
-                if (isDuplicateKey(ex)) {
-                    Optional<ReceivedRecord> existing = find(c, key);
+        try {
+            for (int attempt = 1; ; attempt++) {
+                Instant now = clock.instant();
+                try {
+                    inTransaction(dataSource, c -> insert(c, key, now));
+                    return Optional.empty();
+                } catch (SQLException ex) {
+                    if (!isDuplicateKey(ex)) {
+                        throw ex;
+                    }
+                    // New transactions: some databases refuse further statements after a failed one
+                    Optional<ReceivedRecord> existing = inTransaction(dataSource, c -> find(c, key));
                     if (existing.isPresent()) {
-                        return !existing.get().isCompleted() && takeOver(c, key, now) ? Optional.empty() : existing;
+                        boolean takenOver = !existing.get().isCompleted() && inTransaction(dataSource, c -> takeOver(c, key, now));
+                        return takenOver ? Optional.empty() : existing;
+                    }
+                    // Released between the two statements: try to register it again
+                    if (attempt == REGISTER_ATTEMPTS) {
+                        throw ex;
                     }
                 }
-                throw ex;
             }
         } catch (SQLException ex) {
             throw failure("registering " + key, ex);
@@ -132,16 +134,11 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
 
     @Override
     public void complete(MessageKey key, InboundOutcome outcome) {
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement st = c.prepareStatement("UPDATE " + table
-                     + " SET outcome_status = ?, receiver_country = ?, outcome_text = ? WHERE instance_id = ? AND receiver_id = ?")) {
-            st.setString(1, outcome.getStatus().name());
-            st.setString(2, outcome.getReceiverCountry());
-            String text = outcome.getText();
-            st.setString(3, text == null ? null : text.length() > 2000 ? text.substring(0, 2000) : text);
-            st.setString(4, key.getInstanceIdentifier());
-            st.setString(5, key.getReceiverId());
-            st.executeUpdate();
+        try {
+            inTransaction(dataSource, c -> update(c, "UPDATE " + table
+                            + " SET outcome_status = ?, receiver_country = ?, outcome_text = ? WHERE instance_id = ? AND receiver_id = ?",
+                    outcome.getStatus().name(), outcome.getReceiverCountry(), cut(outcome.getText(), 2000), key.getInstanceIdentifier(),
+                    key.getReceiverId()));
         } catch (SQLException ex) {
             throw failure("completing " + key, ex);
         }
@@ -149,11 +146,9 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
 
     @Override
     public void release(MessageKey key) {
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement st = c.prepareStatement("DELETE FROM " + table + " WHERE instance_id = ? AND receiver_id = ?")) {
-            st.setString(1, key.getInstanceIdentifier());
-            st.setString(2, key.getReceiverId());
-            st.executeUpdate();
+        try {
+            inTransaction(dataSource, c -> update(c, "DELETE FROM " + table + " WHERE instance_id = ? AND receiver_id = ?",
+                    key.getInstanceIdentifier(), key.getReceiverId()));
         } catch (SQLException ex) {
             throw failure("releasing " + key, ex);
         }
@@ -161,8 +156,8 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
 
     @Override
     public Optional<ReceivedRecord> find(MessageKey key) {
-        try (Connection c = dataSource.getConnection()) {
-            return find(c, key);
+        try {
+            return inTransaction(dataSource, c -> find(c, key));
         } catch (SQLException ex) {
             throw failure("reading " + key, ex);
         }
@@ -171,62 +166,70 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
     @Override
     public List<ReceivedRecord> findUnfinished(Duration olderThan) {
         Instant now = clock.instant();
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement st = c.prepareStatement("SELECT instance_id, receiver_id, received_at FROM " + table
-                     + " WHERE outcome_status IS NULL AND received_at < ? AND received_at >= ? ORDER BY received_at")) {
-            st.setMaxRows(100);
-            st.setTimestamp(1, Timestamp.from(now.minus(olderThan)));
-            st.setTimestamp(2, Timestamp.from(now.minus(retention)));
-            try (ResultSet rs = st.executeQuery()) {
-                List<ReceivedRecord> unfinished = new ArrayList<>();
-                while (rs.next()) {
-                    unfinished.add(new ReceivedRecord(new MessageKey(rs.getString(1), rs.getString(2)), rs.getTimestamp(3).toInstant(),
-                            null));
+        try {
+            return inTransaction(dataSource, c -> {
+                try (PreparedStatement st = c.prepareStatement("SELECT instance_id, receiver_id, received_at FROM " + table
+                        + " WHERE outcome_status IS NULL AND received_at < ? AND received_at >= ? ORDER BY received_at")) {
+                    st.setMaxRows(100);
+                    bind(st, now.minus(olderThan), now.minus(retention));
+                    try (ResultSet rs = st.executeQuery()) {
+                        List<ReceivedRecord> unfinished = new ArrayList<>();
+                        while (rs.next()) {
+                            unfinished.add(new ReceivedRecord(new MessageKey(rs.getString("instance_id"), rs.getString("receiver_id")),
+                                    instant(rs, "received_at"), null));
+                        }
+                        return unfinished;
+                    }
                 }
-                return unfinished;
-            }
+            });
         } catch (SQLException ex) {
             throw failure("looking for unfinished messages", ex);
         }
     }
 
-    /** Claims an abandoned registration. The condition is part of the update, so of several nodes only one succeeds. */
-    private boolean takeOver(Connection c, MessageKey key, Instant now) throws SQLException {
-        try (PreparedStatement st = c.prepareStatement("UPDATE " + table + " SET received_at = ?"
-                + " WHERE instance_id = ? AND receiver_id = ? AND outcome_status IS NULL AND received_at < ?")) {
-            st.setTimestamp(1, Timestamp.from(now));
-            st.setString(2, key.getInstanceIdentifier());
-            st.setString(3, key.getReceiverId());
-            st.setTimestamp(4, Timestamp.from(now.minus(processingTimeout)));
-            return st.executeUpdate() == 1;
-        }
-    }
-
-    /** Deletes all entries older than the retention; call it regularly (e.g. daily). Returns the number of deleted rows. */
+    /**
+     * Deletes all entries older than the retention and returns their number. The Spring Boot starter calls it regularly; without the
+     * starter, call it yourself (e.g. daily).
+     */
+    @Override
     public int purgeExpired() {
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement st = c.prepareStatement("DELETE FROM " + table + " WHERE received_at < ?")) {
-            st.setTimestamp(1, Timestamp.from(clock.instant().minus(retention)));
-            return st.executeUpdate();
+        try {
+            return inTransaction(dataSource,
+                    c -> update(c, "DELETE FROM " + table + " WHERE received_at < ?", clock.instant().minus(retention)));
         } catch (SQLException ex) {
             throw failure("purging", ex);
         }
     }
 
+    /** Removes an expired entry of the key, so that a delivery after the retention counts as new, and registers it. */
+    private int insert(Connection c, MessageKey key, Instant now) throws SQLException {
+        update(c, "DELETE FROM " + table + " WHERE instance_id = ? AND receiver_id = ? AND received_at < ?",
+                key.getInstanceIdentifier(), key.getReceiverId(), now.minus(retention));
+        return update(c, "INSERT INTO " + table + " (instance_id, receiver_id, received_at) VALUES (?, ?, ?)",
+                key.getInstanceIdentifier(), key.getReceiverId(), now);
+    }
+
+    /** Claims an abandoned registration. The condition is part of the update, so of several nodes only one succeeds. */
+    private boolean takeOver(Connection c, MessageKey key, Instant now) throws SQLException {
+        return update(c, "UPDATE " + table + " SET received_at = ?"
+                        + " WHERE instance_id = ? AND receiver_id = ? AND outcome_status IS NULL AND received_at < ?",
+                now, key.getInstanceIdentifier(), key.getReceiverId(), now.minus(processingTimeout)) == 1;
+    }
+
     private Optional<ReceivedRecord> find(Connection c, MessageKey key) throws SQLException {
         try (PreparedStatement st = c.prepareStatement("SELECT received_at, outcome_status, receiver_country, outcome_text FROM " + table
                 + " WHERE instance_id = ? AND receiver_id = ?")) {
-            st.setString(1, key.getInstanceIdentifier());
-            st.setString(2, key.getReceiverId());
+            bind(st, key.getInstanceIdentifier(), key.getReceiverId());
             try (ResultSet rs = st.executeQuery()) {
                 if (!rs.next()) {
                     return Optional.empty();
                 }
-                Instant receivedAt = rs.getTimestamp(1).toInstant();
+                Instant receivedAt = instant(rs, "received_at");
                 if (receivedAt.plus(retention).isBefore(clock.instant())) {
                     return Optional.empty();
                 }
-                return Optional.of(new ReceivedRecord(key, receivedAt, outcome(rs.getString(2), rs.getString(3), rs.getString(4))));
+                return Optional.of(new ReceivedRecord(key, receivedAt, outcome(rs.getString("outcome_status"),
+                        rs.getString("receiver_country"), rs.getString("outcome_text"))));
             }
         }
     }
@@ -241,18 +244,6 @@ public final class JdbcReceivedMessageStore implements ReceivedMessageStore {
             // The issues are not stored: a duplicate only needs to know that the document was rejected
             case REJECTED -> InboundOutcome.rejected(text, List.of(MlsIssue.businessRule(null, text == null ? "rejected" : text)));
         };
-    }
-
-    private static boolean isDuplicateKey(SQLException ex) {
-        for (Throwable t = ex; t != null; t = t.getCause()) {
-            if (t instanceof java.sql.SQLIntegrityConstraintViolationException) {
-                return true;
-            }
-            if (t instanceof SQLException sql && sql.getSQLState() != null && sql.getSQLState().startsWith("23")) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static SthenoException failure(String what, SQLException ex) {

@@ -23,6 +23,7 @@ import io.github.b077as.stheno.spring.internal.SpringEventDeliveryListener;
 import io.github.b077as.stheno.spring.internal.SpringEventInboundListener;
 import io.github.b077as.stheno.spring.internal.SthenoHealthIndicator;
 import io.github.b077as.stheno.spring.internal.SthenoMetrics;
+import io.github.b077as.stheno.spring.internal.StoreDataSources;
 import io.github.b077as.stheno.spring.web.SthenoInboundController;
 import io.github.b077as.stheno.validation.DocumentValidator;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -78,8 +79,8 @@ public class SthenoAutoConfiguration {
             if (ds == null) {
                 throw new IllegalStateException("stheno.inbound.store=jdbc needs a DataSource bean");
             }
-            JdbcReceivedMessageStore store = new JdbcReceivedMessageStore(ds, cfg.getJdbcTable(), cfg.getDuplicateRetention(),
-                    cfg.getProcessingTimeout(), Clock.systemUTC());
+            JdbcReceivedMessageStore store = new JdbcReceivedMessageStore(StoreDataSources.withOwnConnections(ds), cfg.getJdbcTable(),
+                    cfg.getDuplicateRetention(), cfg.getProcessingTimeout(), Clock.systemUTC());
             if (cfg.isJdbcCreateTable()) {
                 store.createTableIfMissing();
             }
@@ -198,7 +199,7 @@ public class SthenoAutoConfiguration {
                 if (ds == null) {
                     throw new IllegalStateException("stheno.delivery.store=jdbc needs a DataSource bean");
                 }
-                JdbcDeliveryStore store = new JdbcDeliveryStore(ds, cfg.getJdbcTable());
+                JdbcDeliveryStore store = new JdbcDeliveryStore(StoreDataSources.withOwnConnections(ds), cfg.getJdbcTable());
                 if (cfg.isJdbcCreateTable()) {
                     store.createTablesIfMissing();
                 }

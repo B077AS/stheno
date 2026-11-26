@@ -58,6 +58,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class SthenoInboundService implements DisposableBean {
 
     private static final Duration FIRST_UNFINISHED_CHECK = Duration.ofSeconds(30);
+    private static final Duration PURGE_INTERVAL = Duration.ofHours(1);
 
     private final InboundProcessor processor;
     private final AccessPointAcknowledger acknowledger;
@@ -90,6 +91,10 @@ public class SthenoInboundService implements DisposableBean {
         Duration timeout = properties.getInbound().getProcessingTimeout();
         Duration first = timeout.compareTo(FIRST_UNFINISHED_CHECK) < 0 ? timeout : FIRST_UNFINISHED_CHECK;
         scheduler.scheduleWithFixedDelay(this::checkForUnfinished, first.toMillis(), timeout.toMillis(), TimeUnit.MILLISECONDS);
+        // Often enough that no entry stays much longer than the retention
+        long retention = Math.max(1, properties.getInbound().getDuplicateRetention().toMillis());
+        scheduler.scheduleWithFixedDelay(this::purgeExpired, Math.min(retention, FIRST_UNFINISHED_CHECK.toMillis()),
+                Math.min(retention, PURGE_INTERVAL.toMillis()), TimeUnit.MILLISECONDS);
     }
 
     /** Handles one forwarding call. */
@@ -294,6 +299,21 @@ public class SthenoInboundService implements DisposableBean {
             handlerExecutor.execute(this::reportUnfinished);
         } catch (RuntimeException ex) {
             log.warn("Could not look for unfinished documents: {}", ex.getMessage());
+        }
+    }
+
+    private void purgeExpired() {
+        // Never throws: an exception would end the schedule
+        try {
+            handlerExecutor.execute(() -> {
+                try {
+                    processor.purgeExpired();
+                } catch (RuntimeException ex) {
+                    log.warn("Could not purge old received message records: {}", ex.getMessage());
+                }
+            });
+        } catch (RuntimeException ex) {
+            log.warn("Could not purge old received message records: {}", ex.getMessage());
         }
     }
 

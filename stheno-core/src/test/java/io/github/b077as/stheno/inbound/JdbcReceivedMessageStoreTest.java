@@ -1,9 +1,14 @@
 package io.github.b077as.stheno.inbound;
 
+import io.github.b077as.stheno.TestDatabases;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -105,6 +110,95 @@ class JdbcReceivedMessageStoreTest {
             assertThat(winners).isEqualTo(1);
         } finally {
             pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void worksWhenThePoolDoesNotAutoCommit() {
+        DataSource pool = TestDatabases.withoutAutoCommit(TestDatabases.h2(""));
+        JdbcReceivedMessageStore pooled = new JdbcReceivedMessageStore(pool, "messages", Duration.ofDays(7), clock);
+        pooled.createTableIfMissing();
+
+        assertThat(pooled.register(KEY)).isEmpty();
+        assertThat(pooled.register(KEY)).isPresent();
+        pooled.complete(KEY, InboundOutcome.accepted("DK"));
+        assertThat(pooled.find(KEY).orElseThrow().getOutcome().getReceiverCountry()).isEqualTo("DK");
+        pooled.release(KEY);
+        assertThat(pooled.find(KEY)).isEmpty();
+        pooled.register(KEY);
+        clock.now = clock.now.plus(Duration.ofDays(8));
+        assertThat(pooled.purgeExpired()).isEqualTo(1);
+        assertThat(pooled.purgeExpired()).isZero();
+    }
+
+    @Test
+    void nodesInDifferentTimeZonesAgreeOnTheAgeOfARegistration() {
+        node("America/Los_Angeles").register(KEY);
+        // Only a minute old: still being handled, whatever the zone of the node that asks
+        clock.now = clock.now.plus(Duration.ofMinutes(1));
+        assertThat(node("Asia/Tokyo").register(KEY)).get().extracting(ReceivedRecord::getReceivedAt)
+                .isEqualTo(Instant.parse("2026-11-15T10:00:00Z"));
+    }
+
+    @Test
+    void endOfSummerTimeDoesNotAgeARegistration() {
+        JdbcReceivedMessageStore brussels = node("Europe/Brussels");
+        // One minute after the clocks went back from 03:00 to 02:00
+        clock.now = Instant.parse("2027-10-31T01:01:00Z");
+        brussels.register(KEY);
+        clock.now = clock.now.plus(Duration.ofMinutes(2));
+        assertThat(brussels.register(KEY)).isPresent();
+    }
+
+    private JdbcReceivedMessageStore node(String timeZone) {
+        return new JdbcReceivedMessageStore(TestDatabases.inTimeZone(dataSource, timeZone), "stheno_received_message",
+                Duration.ofDays(7), clock);
+    }
+
+    @Test
+    void tableInANamedSchemaSurvivesARestart() throws SQLException {
+        execute("CREATE SCHEMA peppol");
+        JdbcReceivedMessageStore named = new JdbcReceivedMessageStore(dataSource, "peppol.messages", Duration.ofDays(7), clock);
+        named.createTableIfMissing();
+        named.createTableIfMissing();
+        assertThat(named.register(KEY)).isEmpty();
+    }
+
+    @Test
+    void tableOfTheSameNameInAnotherSchemaIsNotMistakenForOurs() throws SQLException {
+        execute("CREATE SCHEMA other");
+        execute("CREATE TABLE other.messages (x INTEGER)");
+        JdbcReceivedMessageStore own = new JdbcReceivedMessageStore(dataSource, "messages", Duration.ofDays(7), clock);
+        own.createTableIfMissing();
+        assertThat(own.register(KEY)).isEmpty();
+    }
+
+    @Test
+    void nodesStartingTogetherCanAllCreateTheTable() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        try {
+            // The collision is a matter of timing: try often
+            for (int round = 0; round < 100; round++) {
+                JdbcReceivedMessageStore shared = new JdbcReceivedMessageStore(dataSource, "shared_" + round, Duration.ofDays(7));
+                List<Callable<Object>> nodes = new ArrayList<>();
+                for (int i = 0; i < 8; i++) {
+                    nodes.add(() -> {
+                        shared.createTableIfMissing();
+                        return null;
+                    });
+                }
+                for (Future<Object> f : pool.invokeAll(nodes)) {
+                    f.get();
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private void execute(String sql) throws SQLException {
+        try (Connection c = dataSource.getConnection(); Statement st = c.createStatement()) {
+            st.executeUpdate(sql);
         }
     }
 

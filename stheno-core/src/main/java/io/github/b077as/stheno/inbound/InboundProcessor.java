@@ -126,6 +126,11 @@ public final class InboundProcessor {
         return store.findUnfinished(olderThan);
     }
 
+    /** Forgets the expired messages, see {@link ReceivedMessageStore#purgeExpired}. */
+    public int purgeExpired() {
+        return store.purgeExpired();
+    }
+
     /**
      * Step 2: hands a newly received document to the application and records the decision. Must only be called for a {@link Reception}
      * that is not a duplicate.
