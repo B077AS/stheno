@@ -6,25 +6,25 @@ they do.
 
 The latest version is the one on [Maven Central](https://central.sonatype.com/artifact/io.github.b077as/stheno-spring-boot-starter).
 
-## 0.2.0 - unreleased
+## 0.2.0 - 2026-11-26
 
-Message Level Status and Invoice Responses: the status of the documents you sent, and fixes to how received documents are confirmed
-or rejected.
+What happens to the documents you sent: delivery status from the Message Level Status and invoice status from Invoice Responses. Also
+fixes to how received documents are confirmed or rejected, and to the JDBC store.
 
 ### Added
-- **Reading Invoice Responses.** `InvoiceResponseReader` reads a Peppol Invoice Response (T111) into an `InvoiceResponse`;
-  `@PeppolInvoiceResponseHandler` methods receive them in the starter (core: `InvoiceResponseHandler`).
-- `InvoiceResponseBuilder.replyTo` prefills a response from the UBL invoice or credit note it answers.
-- **Invoice status.** The delivery tracker matches responses to sent invoices (`InvoiceReference`: participants, number, type code,
-  date), keeps them all and derives the status in the order the BIS allows (`ResponseHistory`); responses out of sequence do not
-  change it. Events `InvoiceResponseTracked`, `InvoiceResponseOutOfSequence` and `InvoiceResponseForUnknownInvoice`, counters under
-  `stheno.delivery.responses`.
-- `SthenoException.ErrorCode.INVALID_DOCUMENT`.
 - **Delivery tracking.** `DeliveryTracker` follows sent documents through their Message Level Status: the first MLS counts, silence
   is normal unless a positive answer was requested, a requested answer that does not arrive is reported as overdue, and an MLS that
   is faster than the registration is kept. `InMemoryDeliveryStore` and `JdbcDeliveryStore`; in the starter with
   `stheno.delivery.enabled=true`, with the events `DeliveryDecided`, `DeliveryOverdue`, `MlsForUnknownDocument` and `MlsIgnored`,
   and counters under `stheno.delivery.*`. `BuiltEnvelope` says whether a positive MLS was requested.
+- **Reading Invoice Responses.** `InvoiceResponseReader` reads a Peppol Invoice Response (T111) into an `InvoiceResponse`;
+  `@PeppolInvoiceResponseHandler` methods receive them in the starter (core: `InvoiceResponseHandler`).
+- **Invoice status.** The delivery tracker matches responses to sent invoices (`InvoiceReference`: participants, number, type code,
+  date), keeps them all and derives the status in the order the BIS allows (`ResponseHistory`); responses out of sequence do not
+  change it. Events `InvoiceResponseTracked`, `InvoiceResponseOutOfSequence` and `InvoiceResponseForUnknownInvoice`, counters under
+  `stheno.delivery.responses`.
+- `InvoiceResponseBuilder.replyTo` prefills a response from the UBL invoice or credit note it answers.
+- `SthenoException.ErrorCode.INVALID_DOCUMENT`.
 - `RejectionNotDelivered` event and `stheno.ap.rejections.undelivered` counter: the Access Point did not take a rejection (an MLS
   was already decided, MLS sending is disabled, the verdict is switched off, or every attempt failed), so the sender may believe the
   document was delivered.
@@ -33,13 +33,7 @@ or rejected.
 - `stheno.inbound.unhandled-documents` (`retry` / `reject`, core: `UnhandledDocumentPolicy`).
 
 ### Changed
-Check these when upgrading from 0.1.0. The columns of the JDBC received message store are unchanged, so an existing table keeps
-working.
-- The JDBC store writes times as UTC; 0.1.0 wrote the local time of the JVM. Unless that was UTC, existing rows seem older or younger
-  by the difference, once: they may expire or count as unfinished that much earlier or later.
-- New tables use `DATETIME(6)` and `utf8mb4` on MySQL and MariaDB, `DATETIME2(6)` and `NVARCHAR` on SQL Server, and get an index on
-  `received_at`. Existing tables are not altered. On MySQL and MariaDB change an existing `received_at` to `DATETIME(6)`.
-- The starter deletes expired received messages itself (`ReceivedMessageStore.purgeExpired`).
+Check these when upgrading from 0.1.0.
 - A document no handler takes is no longer rejected (`RE`, reason `FD`): it is not taken over and answered `503`, so that the Access
   Point delivers it again. `InboundProcessor.receive` throws `NO_HANDLER`. For the old behaviour set
   `stheno.inbound.unhandled-documents=reject`.
@@ -49,6 +43,12 @@ working.
 - `InboundOutcome.rejected` refuses a rejection made of warnings (`BW`) only, as MLS requires.
 - `Acknowledgement` has a new field `rejectionNotDelivered` and `BuiltEnvelope` a new field `positiveMlsRequested` (their
   constructors changed). `SthenoException.ErrorCode` has the new value `NO_HANDLER`.
+- The columns of the JDBC received message store are unchanged, so an existing table keeps working.
+- The JDBC store writes times as UTC; 0.1.0 wrote the local time of the JVM. Unless that was UTC, existing rows seem older or younger
+  by the difference, once: they may expire or count as unfinished that much earlier or later.
+- New tables use `DATETIME(6)` and `utf8mb4` on MySQL and MariaDB, `DATETIME2(6)` and `NVARCHAR` on SQL Server, and get an index on
+  `received_at`. Existing tables are not altered. On MySQL and MariaDB change an existing `received_at` to `DATETIME(6)`.
+- The starter deletes expired received messages itself (`ReceivedMessageStore.purgeExpired`).
 
 ### Fixed
 - With a pool that has auto-commit switched off, the JDBC store saved nothing, so duplicates reached the handler again.
