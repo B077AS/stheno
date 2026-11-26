@@ -244,7 +244,7 @@ class BackgroundAsyncEndToEndTest {
         HttpResponse<String> health = HttpClient.newHttpClient().send(
                 HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/actuator/health")).build(),
                 HttpResponse.BodyHandlers.ofString());
-        assertThat(health.body()).contains("\"stheno\"").contains("\"handlers\":2").contains("\"mlsVerdict\":true");
+        assertThat(health.body()).contains("\"stheno\"").contains("\"handlers\":3").contains("\"mlsVerdict\":true");
     }
 
     @Test

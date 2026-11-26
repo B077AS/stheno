@@ -30,7 +30,7 @@ public final class InboundProcessor {
     private volatile InboundRouter router;
     private final List<InboundListener> listeners;
     private final UnhandledDocumentPolicy unhandled;
-    private final MlsHandler deliveryTracking;
+    private final DeliveryTracking deliveryTracking;
 
     public InboundProcessor(ReceivedMessageStore store, InboundRouter router, List<InboundListener> listeners) {
         this(store, router, listeners, UnhandledDocumentPolicy.RETRY);
@@ -57,14 +57,15 @@ public final class InboundProcessor {
     }
 
     /**
-     * A processor like this one that also hands every received MLS to {@code tracking} (normally a {@code DeliveryTracker}), before
-     * the application's own MLS handler. If it fails, nothing is recorded and the Access Point delivers the MLS again.
+     * A processor like this one that also tells {@code tracking} (normally a {@code DeliveryTracker}) about every received MLS, before
+     * the application's own MLS handler, and about every business document the application's handler took over. If it fails, nothing
+     * is recorded and the Access Point delivers the document again.
      */
-    public InboundProcessor withDeliveryTracking(MlsHandler tracking) {
+    public InboundProcessor withDeliveryTracking(DeliveryTracking tracking) {
         return new InboundProcessor(this, Objects.requireNonNull(tracking, "tracking"));
     }
 
-    private InboundProcessor(InboundProcessor base, MlsHandler tracking) {
+    private InboundProcessor(InboundProcessor base, DeliveryTracking tracking) {
         this.store = base.store;
         this.routerSupplier = base::getRouter;
         this.listeners = base.listeners;
@@ -174,6 +175,9 @@ public final class InboundProcessor {
             if (outcome == null) {
                 throw new IllegalStateException("The handler for " + document.getDocumentTypeId() + " returned no outcome");
             }
+        }
+        if (deliveryTracking != null && outcome.getStatus() != InboundOutcome.Status.REJECTED) {
+            deliveryTracking.accepted(document);
         }
         return new HandlingResult(HandlingResult.Status.HANDLED, document, outcome, null, null);
     }

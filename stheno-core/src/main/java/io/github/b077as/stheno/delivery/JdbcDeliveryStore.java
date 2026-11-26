@@ -3,15 +3,19 @@ package io.github.b077as.stheno.delivery;
 import io.github.b077as.stheno.SthenoException;
 import io.github.b077as.stheno.inbound.MlsIssue;
 import io.github.b077as.stheno.inbound.ReceivedMls;
+import io.github.b077as.stheno.reply.InvoiceReference;
+import io.github.b077as.stheno.reply.InvoiceResponseBuilder;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -34,7 +38,13 @@ import java.util.regex.Pattern;
  *   mls_sender          VARCHAR(255),
  *   mls_text            VARCHAR(2000),
  *   mls_received_at     TIMESTAMP,
- *   overdue_reported_at TIMESTAMP)
+ *   overdue_reported_at TIMESTAMP,
+ *   invoice_sender      VARCHAR(255),
+ *   invoice_receiver    VARCHAR(255),
+ *   invoice_number      VARCHAR(255),
+ *   invoice_type        VARCHAR(255),
+ *   invoice_date        DATE)
+ * CREATE INDEX stheno_sent_document_inv ON stheno_sent_document (invoice_number, invoice_sender)
  *
  * CREATE TABLE stheno_sent_document_issue (
  *   instance_id VARCHAR(255)  NOT NULL,
@@ -43,18 +53,55 @@ import java.util.regex.Pattern;
  *   location    VARCHAR(1000) NOT NULL,
  *   description VARCHAR(2000) NOT NULL,
  *   PRIMARY KEY (instance_id, issue_no))
+ *
+ * CREATE TABLE stheno_sent_document_response (
+ *   invoice_sender   VARCHAR(255) NOT NULL,
+ *   envelope_id      VARCHAR(255) NOT NULL,
+ *   invoice_receiver VARCHAR(255) NOT NULL,
+ *   invoice_number   VARCHAR(255) NOT NULL,
+ *   invoice_type     VARCHAR(255) NOT NULL,
+ *   invoice_date     DATE,
+ *   response_status  VARCHAR(2)   NOT NULL,
+ *   response_id      VARCHAR(255),
+ *   issue_date       DATE,
+ *   effective_date   DATE,
+ *   response_note    VARCHAR(2000),
+ *   received_at      TIMESTAMP    NOT NULL,
+ *   PRIMARY KEY (invoice_sender, envelope_id))
+ * CREATE INDEX stheno_sent_document_response_inv ON stheno_sent_document_response (invoice_number, invoice_sender)
+ *
+ * CREATE TABLE stheno_sent_document_response_entry (
+ *   invoice_sender   VARCHAR(255) NOT NULL,
+ *   envelope_id      VARCHAR(255) NOT NULL,
+ *   line_no          INTEGER      NOT NULL,
+ *   entry_no         INTEGER      NOT NULL,
+ *   list_id          VARCHAR(255),
+ *   status_code      VARCHAR(255),
+ *   entry_text       VARCHAR(2000),
+ *   has_condition    INTEGER      NOT NULL,
+ *   attribute_id     VARCHAR(255),
+ *   condition_text   VARCHAR(2000),
+ *   PRIMARY KEY (invoice_sender, envelope_id, line_no))
  * </pre>
- * Longer texts of an MLS are cut to the column size. No document content is stored.
+ * Longer texts of an answer are cut to the column size. No document content is stored.
  */
 public final class JdbcDeliveryStore implements DeliveryStore {
 
     private static final Pattern TABLE_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_.]{0,120}");
+    private static final String DOCUMENT_COLUMNS = "instance_id, sent_at, positive_requested, mls_code, mls_id, mls_sender, mls_text,"
+            + " mls_received_at, invoice_sender, invoice_receiver, invoice_number, invoice_type, invoice_date";
+    private static final String SAME_INVOICE = "invoice_number = ? AND invoice_sender = ? AND invoice_receiver = ? AND invoice_type = ?";
 
     private final DataSource dataSource;
     private final String table;
     private final String issueTable;
+    private final String responseTable;
+    private final String entryTable;
 
-    /** @param table name of the document table; the issue table has the same name followed by {@code _issue} */
+    /**
+     * @param table name of the document table; the other tables have the same name followed by {@code _issue}, {@code _response} and
+     *              {@code _response_entry}
+     */
     public JdbcDeliveryStore(DataSource dataSource, String table) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         if (table == null || !TABLE_NAME.matcher(table).matches()) {
@@ -62,30 +109,52 @@ public final class JdbcDeliveryStore implements DeliveryStore {
         }
         this.table = table;
         this.issueTable = table + "_issue";
+        this.responseTable = table + "_response";
+        this.entryTable = table + "_response_entry";
     }
 
     /** Creates the tables if they do not exist (standard SQL; use own migrations for special databases). */
     public void createTablesIfMissing() {
         inTransaction("creating the tables", c -> {
-            create(c, table, "instance_id VARCHAR(255) NOT NULL PRIMARY KEY, created_at TIMESTAMP NOT NULL, sent_at TIMESTAMP, "
+            if (create(c, table, "instance_id VARCHAR(255) NOT NULL PRIMARY KEY, created_at TIMESTAMP NOT NULL, sent_at TIMESTAMP, "
                     + "positive_requested INTEGER NOT NULL, mls_code VARCHAR(2), mls_id VARCHAR(255), mls_sender VARCHAR(255), "
-                    + "mls_text VARCHAR(2000), mls_received_at TIMESTAMP, overdue_reported_at TIMESTAMP");
+                    + "mls_text VARCHAR(2000), mls_received_at TIMESTAMP, overdue_reported_at TIMESTAMP, invoice_sender VARCHAR(255), "
+                    + "invoice_receiver VARCHAR(255), invoice_number VARCHAR(255), invoice_type VARCHAR(255), invoice_date DATE")) {
+                indexByInvoice(c, table);
+            }
             create(c, issueTable, "instance_id VARCHAR(255) NOT NULL, issue_no INTEGER NOT NULL, reason VARCHAR(2) NOT NULL, "
                     + "location VARCHAR(1000) NOT NULL, description VARCHAR(2000) NOT NULL, PRIMARY KEY (instance_id, issue_no)");
+            if (create(c, responseTable, "invoice_sender VARCHAR(255) NOT NULL, envelope_id VARCHAR(255) NOT NULL, "
+                    + "invoice_receiver VARCHAR(255) NOT NULL, invoice_number VARCHAR(255) NOT NULL, invoice_type VARCHAR(255) NOT NULL, "
+                    + "invoice_date DATE, response_status VARCHAR(2) NOT NULL, response_id VARCHAR(255), issue_date DATE, "
+                    + "effective_date DATE, response_note VARCHAR(2000), received_at TIMESTAMP NOT NULL, "
+                    + "PRIMARY KEY (invoice_sender, envelope_id)")) {
+                indexByInvoice(c, responseTable);
+            }
+            create(c, entryTable, "invoice_sender VARCHAR(255) NOT NULL, envelope_id VARCHAR(255) NOT NULL, line_no INTEGER NOT NULL, "
+                    + "entry_no INTEGER NOT NULL, list_id VARCHAR(255), status_code VARCHAR(255), entry_text VARCHAR(2000), "
+                    + "has_condition INTEGER NOT NULL, attribute_id VARCHAR(255), condition_text VARCHAR(2000), "
+                    + "PRIMARY KEY (invoice_sender, envelope_id, line_no)");
             return null;
         });
     }
 
     @Override
-    public TrackedDocument register(String instanceIdentifier, boolean positiveMlsRequested, Instant now) {
+    public TrackedDocument register(String instanceIdentifier, boolean positiveMlsRequested, InvoiceReference invoice, Instant now) {
+        Object[] reference = invoice == null ? new Object[5] : new Object[] {invoice.getInvoiceSenderId(), invoice.getInvoiceReceiverId(),
+                invoice.getInvoiceNumber(), invoice.getTypeCode(), date(invoice.getIssueDate())};
         return insertingOnce("registering " + instanceIdentifier, c -> {
             if (find(c, instanceIdentifier).isEmpty()) {
-                update(c, "INSERT INTO " + table + " (instance_id, created_at, sent_at, positive_requested) VALUES (?, ?, ?, ?)",
-                        instanceIdentifier, Timestamp.from(now), Timestamp.from(now), positiveMlsRequested ? 1 : 0);
+                update(c, "INSERT INTO " + table + " (instance_id, created_at, sent_at, positive_requested, invoice_sender,"
+                                + " invoice_receiver, invoice_number, invoice_type, invoice_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        instanceIdentifier, Timestamp.from(now), Timestamp.from(now), positiveMlsRequested ? 1 : 0, reference[0],
+                        reference[1], reference[2], reference[3], reference[4]);
             } else {
                 // Completes a record created by an MLS that came first; leaves an already registered document alone
-                update(c, "UPDATE " + table + " SET sent_at = ?, positive_requested = ? WHERE instance_id = ? AND sent_at IS NULL",
-                        Timestamp.from(now), positiveMlsRequested ? 1 : 0, instanceIdentifier);
+                update(c, "UPDATE " + table + " SET sent_at = ?, positive_requested = ?, invoice_sender = ?, invoice_receiver = ?,"
+                                + " invoice_number = ?, invoice_type = ?, invoice_date = ? WHERE instance_id = ? AND sent_at IS NULL",
+                        Timestamp.from(now), positiveMlsRequested ? 1 : 0, reference[0], reference[1], reference[2], reference[3],
+                        reference[4], instanceIdentifier);
             }
             return find(c, instanceIdentifier).orElseThrow();
         });
@@ -121,9 +190,72 @@ public final class JdbcDeliveryStore implements DeliveryStore {
     }
 
     @Override
+    public TrackedResponse recordResponse(InvoiceReference invoice, TrackedResponse response) {
+        String sender = invoice.getInvoiceSenderId();
+        String envelopeId = response.getInstanceIdentifier();
+        return insertingOnce("recording the response " + envelopeId, c -> {
+            Optional<TrackedResponse> kept = findResponse(c, sender, envelopeId);
+            if (kept.isPresent()) {
+                return kept.get();
+            }
+            update(c, "INSERT INTO " + responseTable + " (invoice_sender, envelope_id, invoice_receiver, invoice_number, invoice_type,"
+                            + " invoice_date, response_status, response_id, issue_date, effective_date, response_note, received_at)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    sender, envelopeId, invoice.getInvoiceReceiverId(), invoice.getInvoiceNumber(), invoice.getTypeCode(),
+                    date(invoice.getIssueDate()), response.getStatus().name(), cut(response.getResponseId(), 255),
+                    date(response.getIssueDate()), date(response.getEffectiveDate()), cut(response.getNote(), 2000),
+                    Timestamp.from(response.getReceivedAt()));
+            insertEntries(c, sender, envelopeId, response.getStatusEntries());
+            return findResponse(c, sender, envelopeId).orElseThrow();
+        });
+    }
+
+    @Override
+    public List<TrackedResponse> findResponses(InvoiceReference invoice) {
+        return inTransaction("reading the responses to invoice " + invoice.getInvoiceNumber(), c -> {
+            List<String> ids = new ArrayList<>();
+            try (PreparedStatement st = c.prepareStatement("SELECT envelope_id, invoice_date FROM " + responseTable + " WHERE "
+                    + SAME_INVOICE + " ORDER BY received_at, envelope_id")) {
+                bindInvoice(st, invoice);
+                try (ResultSet rs = st.executeQuery()) {
+                    while (rs.next()) {
+                        if (DeliveryStore.compatibleDates(localDate(rs.getDate(2)), invoice.getIssueDate())) {
+                            ids.add(rs.getString(1));
+                        }
+                    }
+                }
+            }
+            List<TrackedResponse> found = new ArrayList<>();
+            for (String id : ids) {
+                findResponse(c, invoice.getInvoiceSenderId(), id).ifPresent(found::add);
+            }
+            return List.copyOf(found);
+        });
+    }
+
+    @Override
+    public List<TrackedDocument> findByInvoice(InvoiceReference invoice) {
+        return inTransaction("looking for invoice " + invoice.getInvoiceNumber(), c -> {
+            try (PreparedStatement st = c.prepareStatement("SELECT " + DOCUMENT_COLUMNS + " FROM " + table + " WHERE " + SAME_INVOICE
+                    + " AND sent_at IS NOT NULL ORDER BY sent_at DESC, instance_id")) {
+                bindInvoice(st, invoice);
+                try (ResultSet rs = st.executeQuery()) {
+                    List<TrackedDocument> found = new ArrayList<>();
+                    while (rs.next()) {
+                        if (DeliveryStore.compatibleDates(localDate(rs.getDate("invoice_date")), invoice.getIssueDate())) {
+                            found.add(document(c, rs));
+                        }
+                    }
+                    return List.copyOf(found);
+                }
+            }
+        });
+    }
+
+    @Override
     public List<TrackedDocument> findOverdue(Instant sentBefore, boolean onlyUnreported, int max) {
         return inTransaction("looking for overdue documents", c -> {
-            try (PreparedStatement st = c.prepareStatement("SELECT instance_id, sent_at FROM " + table
+            try (PreparedStatement st = c.prepareStatement("SELECT " + DOCUMENT_COLUMNS + " FROM " + table
                     + " WHERE mls_code IS NULL AND positive_requested = 1 AND sent_at < ?"
                     + (onlyUnreported ? " AND overdue_reported_at IS NULL" : "") + " ORDER BY sent_at")) {
                 st.setMaxRows(max);
@@ -131,7 +263,7 @@ public final class JdbcDeliveryStore implements DeliveryStore {
                 try (ResultSet rs = st.executeQuery()) {
                     List<TrackedDocument> overdue = new ArrayList<>();
                     while (rs.next()) {
-                        overdue.add(new TrackedDocument(rs.getString(1), rs.getTimestamp(2).toInstant(), true, null, null));
+                        overdue.add(document(c, rs));
                     }
                     return overdue;
                 }
@@ -148,6 +280,10 @@ public final class JdbcDeliveryStore implements DeliveryStore {
     @Override
     public int purge(Instant createdBefore) {
         return inTransaction("purging", c -> {
+            update(c, "DELETE FROM " + entryTable + " WHERE EXISTS (SELECT 1 FROM " + responseTable + " r WHERE r.invoice_sender = "
+                    + entryTable + ".invoice_sender AND r.envelope_id = " + entryTable + ".envelope_id AND r.received_at < ?)",
+                    Timestamp.from(createdBefore));
+            update(c, "DELETE FROM " + responseTable + " WHERE received_at < ?", Timestamp.from(createdBefore));
             update(c, "DELETE FROM " + issueTable + " WHERE instance_id IN (SELECT instance_id FROM " + table + " WHERE created_at < ?)",
                     Timestamp.from(createdBefore));
             return update(c, "DELETE FROM " + table + " WHERE created_at < ?", Timestamp.from(createdBefore));
@@ -155,19 +291,25 @@ public final class JdbcDeliveryStore implements DeliveryStore {
     }
 
     private Optional<TrackedDocument> find(Connection c, String id) throws SQLException {
-        try (PreparedStatement st = c.prepareStatement("SELECT sent_at, positive_requested, mls_code, mls_id, mls_sender, mls_text,"
-                + " mls_received_at FROM " + table + " WHERE instance_id = ?")) {
+        try (PreparedStatement st = c.prepareStatement("SELECT " + DOCUMENT_COLUMNS + " FROM " + table + " WHERE instance_id = ?")) {
             st.setString(1, id);
             try (ResultSet rs = st.executeQuery()) {
-                if (!rs.next()) {
-                    return Optional.empty();
-                }
-                ReceivedMls mls = rs.getString(3) == null ? null
-                        : new ReceivedMls(rs.getString(3), id, rs.getString(6), issues(c, id), rs.getString(4), rs.getString(5));
-                return Optional.of(new TrackedDocument(id, instant(rs.getTimestamp(1)), rs.getInt(2) == 1, mls,
-                        instant(rs.getTimestamp(7))));
+                return rs.next() ? Optional.of(document(c, rs)) : Optional.empty();
             }
         }
+    }
+
+    /** The current row of a query for {@link #DOCUMENT_COLUMNS}. */
+    private TrackedDocument document(Connection c, ResultSet rs) throws SQLException {
+        String id = rs.getString("instance_id");
+        String code = rs.getString("mls_code");
+        ReceivedMls mls = code == null ? null : new ReceivedMls(code, id, rs.getString("mls_text"), issues(c, id), rs.getString("mls_id"),
+                rs.getString("mls_sender"));
+        InvoiceReference invoice = rs.getString("invoice_number") == null ? null
+                : InvoiceReference.of(rs.getString("invoice_sender"), rs.getString("invoice_receiver"), rs.getString("invoice_number"),
+                        rs.getString("invoice_type"), localDate(rs.getDate("invoice_date")));
+        return new TrackedDocument(id, instant(rs.getTimestamp("sent_at")), rs.getInt("positive_requested") == 1, mls,
+                instant(rs.getTimestamp("mls_received_at")), invoice);
     }
 
     private List<MlsIssue> issues(Connection c, String id) throws SQLException {
@@ -185,6 +327,83 @@ public final class JdbcDeliveryStore implements DeliveryStore {
                 return List.copyOf(issues);
             }
         }
+    }
+
+    private Optional<TrackedResponse> findResponse(Connection c, String sender, String envelopeId) throws SQLException {
+        try (PreparedStatement st = c.prepareStatement("SELECT response_status, response_id, issue_date, effective_date, response_note,"
+                + " received_at FROM " + responseTable + " WHERE invoice_sender = ? AND envelope_id = ?")) {
+            st.setString(1, sender);
+            st.setString(2, envelopeId);
+            try (ResultSet rs = st.executeQuery()) {
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(TrackedResponse.builder()
+                        .instanceIdentifier(envelopeId)
+                        .status(InvoiceResponseBuilder.Status.valueOf(rs.getString(1)))
+                        .responseId(rs.getString(2))
+                        .issueDate(localDate(rs.getDate(3)))
+                        .effectiveDate(localDate(rs.getDate(4)))
+                        .note(rs.getString(5))
+                        .receivedAt(instant(rs.getTimestamp(6)))
+                        .statusEntries(entries(c, sender, envelopeId))
+                        .build());
+            }
+        }
+    }
+
+    /** One row per condition of an entry, or one row for an entry without conditions. */
+    private void insertEntries(Connection c, String sender, String envelopeId, List<InvoiceResponseBuilder.StatusEntry> entries)
+            throws SQLException {
+        String sql = "INSERT INTO " + entryTable + " (invoice_sender, envelope_id, line_no, entry_no, list_id, status_code, entry_text,"
+                + " has_condition, attribute_id, condition_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        int line = 0;
+        for (int no = 0; no < entries.size(); no++) {
+            InvoiceResponseBuilder.StatusEntry entry = entries.get(no);
+            List<InvoiceResponseBuilder.Condition> conditions = entry.getConditions();
+            for (int i = 0; i < Math.max(1, conditions.size()); i++) {
+                InvoiceResponseBuilder.Condition condition = conditions.isEmpty() ? null : conditions.get(i);
+                update(c, sql, sender, envelopeId, line++, no, cut(entry.getListId(), 255), cut(entry.getCode(), 255),
+                        cut(entry.getText(), 2000), condition == null ? 0 : 1,
+                        condition == null ? null : cut(condition.getAttributeId(), 255),
+                        condition == null ? null : cut(condition.getDescription(), 2000));
+            }
+        }
+    }
+
+    private List<InvoiceResponseBuilder.StatusEntry> entries(Connection c, String sender, String envelopeId) throws SQLException {
+        try (PreparedStatement st = c.prepareStatement("SELECT entry_no, list_id, status_code, entry_text, has_condition, attribute_id,"
+                + " condition_text FROM " + entryTable + " WHERE invoice_sender = ? AND envelope_id = ? ORDER BY line_no")) {
+            st.setString(1, sender);
+            st.setString(2, envelopeId);
+            try (ResultSet rs = st.executeQuery()) {
+                List<InvoiceResponseBuilder.StatusEntry> entries = new ArrayList<>();
+                List<InvoiceResponseBuilder.Condition> conditions = null;
+                int previous = -1;
+                while (rs.next()) {
+                    if (rs.getInt(1) != previous) {
+                        previous = rs.getInt(1);
+                        conditions = new ArrayList<>();
+                        // The list is filled by the following rows of the same entry
+                        entries.add(new InvoiceResponseBuilder.StatusEntry(rs.getString(2), rs.getString(3), rs.getString(4), conditions));
+                    }
+                    if (rs.getInt(5) == 1) {
+                        conditions.add(new InvoiceResponseBuilder.Condition(rs.getString(6), rs.getString(7)));
+                    }
+                }
+                return entries.stream()
+                        .map(e -> new InvoiceResponseBuilder.StatusEntry(e.getListId(), e.getCode(), e.getText(),
+                                List.copyOf(e.getConditions())))
+                        .toList();
+            }
+        }
+    }
+
+    private static void bindInvoice(PreparedStatement st, InvoiceReference invoice) throws SQLException {
+        st.setString(1, invoice.getInvoiceNumber());
+        st.setString(2, invoice.getInvoiceSenderId());
+        st.setString(3, invoice.getInvoiceReceiverId());
+        st.setString(4, invoice.getTypeCode());
     }
 
     /** Runs work that may insert a row; if another thread or node inserted it first, runs it once more (it then finds the row). */
@@ -224,16 +443,24 @@ public final class JdbcDeliveryStore implements DeliveryStore {
         }
     }
 
-    private static void create(Connection c, String name, String columns) throws SQLException {
+    /** @return {@code true} if the table was created now */
+    private static boolean create(Connection c, String name, String columns) throws SQLException {
         try (ResultSet rs = c.getMetaData().getTables(null, null, null, new String[] {"TABLE"})) {
             while (rs.next()) {
                 if (name.equalsIgnoreCase(rs.getString("TABLE_NAME"))) {
-                    return;
+                    return false;
                 }
             }
         }
         try (Statement st = c.createStatement()) {
             st.executeUpdate("CREATE TABLE " + name + " (" + columns + ")");
+        }
+        return true;
+    }
+
+    private static void indexByInvoice(Connection c, String name) throws SQLException {
+        try (Statement st = c.createStatement()) {
+            st.executeUpdate("CREATE INDEX " + name.replace('.', '_') + "_inv ON " + name + " (invoice_number, invoice_sender)");
         }
     }
 
@@ -248,6 +475,14 @@ public final class JdbcDeliveryStore implements DeliveryStore {
 
     private static Instant instant(Timestamp timestamp) {
         return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private static Date date(LocalDate date) {
+        return date == null ? null : Date.valueOf(date);
+    }
+
+    private static LocalDate localDate(Date date) {
+        return date == null ? null : date.toLocalDate();
     }
 
     private static String cut(String text, int max) {

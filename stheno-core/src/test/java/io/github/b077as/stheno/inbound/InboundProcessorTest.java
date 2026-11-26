@@ -2,6 +2,10 @@ package io.github.b077as.stheno.inbound;
 
 import io.github.b077as.stheno.TestDocs;
 import io.github.b077as.stheno.envelope.BuiltEnvelope;
+import io.github.b077as.stheno.reply.InvoiceResponse;
+import io.github.b077as.stheno.reply.InvoiceResponseBuilder;
+import io.github.b077as.stheno.reply.InvoiceResponseHandler;
+import io.github.b077as.stheno.reply.InvoiceResponseReader;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -184,6 +188,61 @@ class InboundProcessorTest {
     }
 
     @Test
+    void anAcceptedInvoiceResponseReachesItsHandlerAndTheTracker() {
+        var tracker = new io.github.b077as.stheno.delivery.DeliveryTracker(
+                new io.github.b077as.stheno.delivery.InMemoryDeliveryStore(), List.of());
+        BuiltEnvelope sent = TestDocs.namedInvoiceEnvelope("sent-1");
+        tracker.track(sent);
+        List<InvoiceResponse> seen = new ArrayList<>();
+        InboundProcessor processor = processor(InboundRouter.builder()
+                .when(InvoiceResponseReader::isInvoiceResponse, InvoiceResponseHandler.asInboundHandler((response, doc) -> {
+                    seen.add(response);
+                    return InboundOutcome.accepted("BE");
+                }))
+                .build()).withDeliveryTracking(tracker);
+
+        HandlingResult result = processor.process(reply(sent, InvoiceResponseBuilder.Status.RE).getXml(), null);
+
+        // The buyer rejected the invoice; the response itself is accepted and acknowledged like any business document
+        assertThat(result.getOutcome().getMlsResponseCode()).isEqualTo("AP");
+        assertThat(result.isAcknowledgeable()).isTrue();
+        assertThat(seen).singleElement().extracting(InvoiceResponse::getStatus).isEqualTo(InvoiceResponseBuilder.Status.RE);
+        assertThat(tracker.responsesTo(tracker.find("sent-1").orElseThrow()).getStatus()).isEqualTo(InvoiceResponseBuilder.Status.RE);
+    }
+
+    @Test
+    void aRejectedInvoiceResponseIsNotTracked() {
+        var tracker = new io.github.b077as.stheno.delivery.DeliveryTracker(
+                new io.github.b077as.stheno.delivery.InMemoryDeliveryStore(), List.of());
+        BuiltEnvelope sent = TestDocs.namedInvoiceEnvelope("sent-1");
+        tracker.track(sent);
+        processor(InboundRouter.builder()
+                .fallback(doc -> InboundOutcome.rejected(MlsIssue.syntax(null, "broken")))
+                .build())
+                .withDeliveryTracking(tracker)
+                .process(reply(sent, InvoiceResponseBuilder.Status.AP).getXml(), null);
+        assertThat(tracker.responsesTo(tracker.find("sent-1").orElseThrow()).getResponses()).isEmpty();
+    }
+
+    @Test
+    void failedTrackingReleasesTheDocument() {
+        InboundProcessor processor = processor(InboundRouter.builder().fallback(doc -> InboundOutcome.accepted("BE")).build())
+                .withDeliveryTracking(new DeliveryTracking() {
+                    @Override
+                    public void handle(ReceivedMls mls, InboundDocument document) {
+                    }
+
+                    @Override
+                    public void accepted(InboundDocument document) {
+                        throw new IllegalStateException("database down");
+                    }
+                });
+        HandlingResult result = processor.process(TestDocs.invoiceEnvelope("sent-1").getXml(), null);
+        assertThat(result.getStatus()).isEqualTo(HandlingResult.Status.FAILED);
+        assertThat(store.size()).isZero();
+    }
+
+    @Test
     void duplicateKeyIgnoresReceiverCase() {
         InboundDocument a = InboundDocument.builder().instanceIdentifier("x").receiverId("iso6523-actorid-upis::0088:ABC").build();
         InboundDocument b = InboundDocument.builder().instanceIdentifier("x").receiverId("0088:abc").build();
@@ -202,6 +261,13 @@ class InboundProcessorTest {
                 List.of(broken));
         assertThat(processor.process(TestDocs.invoiceEnvelope("66666666-6666-6666-6666-666666666666").getXml(), null).getStatus())
                 .isEqualTo(HandlingResult.Status.HANDLED);
+    }
+
+    private static BuiltEnvelope reply(BuiltEnvelope invoice, InvoiceResponseBuilder.Status status) {
+        return InvoiceResponseBuilder.replyTo(new io.github.b077as.stheno.envelope.EnvelopeReader().read(invoice.getXml(), null))
+                .id("imr-1")
+                .status(status)
+                .buildEnvelope("DK");
     }
 
     private InboundProcessor processor(InboundRouter router) {

@@ -8,9 +8,18 @@ The latest version is the one on [Maven Central](https://central.sonatype.com/ar
 
 ## 0.2.0 - unreleased
 
-Message Level Status: the status of the documents you sent, and fixes to how received documents are confirmed or rejected.
+Message Level Status and Invoice Responses: the status of the documents you sent, and fixes to how received documents are confirmed
+or rejected.
 
 ### Added
+- **Reading Invoice Responses.** `InvoiceResponseReader` reads a Peppol Invoice Response (T111) into an `InvoiceResponse`;
+  `@PeppolInvoiceResponseHandler` methods receive them in the starter (core: `InvoiceResponseHandler`).
+- `InvoiceResponseBuilder.replyTo` prefills a response from the UBL invoice or credit note it answers.
+- **Invoice status.** The delivery tracker matches responses to sent invoices (`InvoiceReference`: participants, number, type code,
+  date), keeps them all and derives the status in the order the BIS allows (`ResponseHistory`); responses out of sequence do not
+  change it. Events `InvoiceResponseTracked`, `InvoiceResponseOutOfSequence` and `InvoiceResponseForUnknownInvoice`, counters under
+  `stheno.delivery.responses`. The JDBC delivery store has two more tables and, in its document table, the invoice columns.
+- `SthenoException.ErrorCode.INVALID_DOCUMENT`.
 - **Delivery tracking.** `DeliveryTracker` follows sent documents through their Message Level Status: the first MLS counts, silence
   is normal unless a positive answer was requested, a requested answer that does not arrive is reported as overdue, and an MLS that
   is faster than the registration is kept. `InMemoryDeliveryStore` and `JdbcDeliveryStore`; in the starter with

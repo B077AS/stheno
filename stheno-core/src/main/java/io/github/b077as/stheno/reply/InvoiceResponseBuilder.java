@@ -8,6 +8,7 @@ import io.github.b077as.stheno.envelope.EnvelopeBuilder;
 import io.github.b077as.stheno.id.IdCheck;
 import io.github.b077as.stheno.id.IdUsage;
 import io.github.b077as.stheno.id.PeppolIds;
+import io.github.b077as.stheno.inbound.InboundDocument;
 import lombok.Value;
 import oasis.names.specification.ubl.schema.xsd.applicationresponse_21.ApplicationResponseType;
 import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_21.ConditionType;
@@ -46,7 +47,10 @@ public final class InvoiceResponseBuilder {
     /** Peppol process identifier value of the Invoice Response. */
     public static final String PROCESS_ID = PROFILE_ID;
 
-    /** Invoice status codes (UNCL4343 subset for T111). */
+    /**
+     * Invoice status codes (UNCL4343 subset for T111), declared in the order the BIS lets the status of one invoice advance (rule
+     * OP-BR111-R012).
+     */
     public enum Status {
         /** Message acknowledgement: the invoice was received. */
         AB,
@@ -116,6 +120,30 @@ public final class InvoiceResponseBuilder {
 
     static InvoiceResponseBuilder create(Clock clock) {
         return new InvoiceResponseBuilder(clock);
+    }
+
+    /**
+     * Starts the answer to a received UBL invoice or credit note. Taken over from it:
+     * <ul>
+     * <li>the participants, swapped, as the envelope names them</li>
+     * <li>the invoice number, document type code and issue date</li>
+     * <li>the legal names: the customer's for the sender of the response, the supplier's for its receiver. Not for self-billed
+     * documents, where the roles differ: set the names with {@link #sender} and {@link #receiver}</li>
+     * </ul>
+     * What the invoice does not say stays empty and is reported by {@link #build()}. Still needed: {@link #id}, {@link #status} and,
+     * for {@link #buildEnvelope}, the country of the sender.
+     *
+     * @throws SthenoException {@code INVALID_INPUT} if the document is no UBL invoice or credit note
+     */
+    public static InvoiceResponseBuilder replyTo(InboundDocument invoice) {
+        Element root = invoice.getPayload() == null ? null : invoice.getPayload().getXml();
+        UblInvoiceHeader header = UblInvoiceHeader.read(root).orElseThrow(() -> new SthenoException(
+                SthenoException.ErrorCode.INVALID_INPUT, "An Invoice Response can only be prefilled from a UBL Invoice or CreditNote"));
+        boolean selfBilled = header.getCustomizationId() != null && header.getCustomizationId().contains("selfbilling");
+        return create()
+                .sender(invoice.getReceiverId(), selfBilled ? null : header.getCustomerName())
+                .receiver(invoice.getSenderId(), selfBilled ? null : header.getSupplierName())
+                .invoice(header.getNumber(), header.getTypeCode(), header.getIssueDate());
     }
 
     /** Identifier of this response (unique for the sender). */

@@ -2,6 +2,8 @@ package io.github.b077as.stheno.validation;
 
 import io.github.b077as.stheno.SthenoException;
 import io.github.b077as.stheno.TestDocs;
+import io.github.b077as.stheno.envelope.EnvelopeReader;
+import io.github.b077as.stheno.inbound.InboundDocument;
 import io.github.b077as.stheno.inbound.MlsIssue;
 import io.github.b077as.stheno.reply.InvoiceResponseBuilder;
 import org.junit.jupiter.api.Test;
@@ -61,6 +63,14 @@ class DocumentValidatorTest {
             ValidationReport report = VALIDATOR.validate(b.build());
             assertThat(report.getErrors()).as(status + ": " + report.getFindings()).isEmpty();
         }
+    }
+
+    @Test
+    void aReplyPrefilledFromAnInvoicePassesTheOfficialRules() {
+        InboundDocument invoice = new EnvelopeReader().read(TestDocs.namedInvoiceEnvelope("invoice-1").getXml(), null);
+        Element response = InvoiceResponseBuilder.replyTo(invoice).id("imr-1").status(InvoiceResponseBuilder.Status.AP).build();
+        ValidationReport report = VALIDATOR.validate(response);
+        assertThat(report.getErrors()).as(report.getFindings().toString()).isEmpty();
     }
 
     @Test

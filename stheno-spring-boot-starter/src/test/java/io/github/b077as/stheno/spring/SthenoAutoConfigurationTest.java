@@ -5,6 +5,9 @@ import io.github.b077as.stheno.ap.PhossApClient;
 import io.github.b077as.stheno.delivery.DeliveryStore;
 import io.github.b077as.stheno.delivery.DeliveryTracker;
 import io.github.b077as.stheno.delivery.JdbcDeliveryStore;
+import io.github.b077as.stheno.inbound.InboundPayload;
+import io.github.b077as.stheno.reply.InvoiceResponse;
+import io.github.b077as.stheno.reply.InvoiceResponseBuilder;
 import io.github.b077as.stheno.spring.event.SthenoEvents;
 import org.springframework.context.ApplicationListener;
 import org.springframework.context.PayloadApplicationEvent;
@@ -155,6 +158,31 @@ class SthenoAutoConfigurationTest {
     }
 
     @Test
+    void invoiceResponsesGoToTheirHandlerBeforeTheFallback() {
+        runner.withUserConfiguration(ResponseHandlers.class, GoodHandlers.class).run(ctx -> {
+            InboundRouter router = ctx.getBean(InboundProcessor.class).getRouter();
+            InboundDocument response = InboundDocument.builder()
+                    .documentTypeId("busdox-docid-qns::" + InvoiceResponseBuilder.DOCUMENT_TYPE_ID)
+                    .payload(InboundPayload.xml(InvoiceResponseBuilder.create().id("r").sender("0088:abc", "B")
+                            .receiver("0088:def", "S").invoice("1", "380", null).status(InvoiceResponseBuilder.Status.AP).build()))
+                    .build();
+            assertThat(router.findHandler(response).handle(response).getReceiverCountry()).isEqualTo("SE");
+        });
+    }
+
+    @Test
+    void wrongResponseHandlerSignatureFailsTheStart() {
+        runner.withUserConfiguration(WrongResponseSignature.class)
+                .run(ctx -> assertThat(ctx).getFailure().hasStackTraceContaining("InboundOutcome name(InvoiceResponse response)"));
+    }
+
+    @Test
+    void twoHandlersForInvoiceResponsesFailTheStart() {
+        runner.withUserConfiguration(ResponseHandlers.class, TypedResponseHandler.class)
+                .run(ctx -> assertThat(ctx).getFailure().hasStackTraceContaining("Invoice Responses would have two handlers"));
+    }
+
+    @Test
     void ownRouterBeanWins() {
         runner.withUserConfiguration(OwnRouter.class, GoodHandlers.class).run(ctx -> {
             InboundDocument any = InboundDocument.builder().documentTypeId("busdox-docid-qns::urn:x:invoice").build();
@@ -218,6 +246,44 @@ class SthenoAutoConfigurationTest {
         @Bean
         Handlers second() {
             return new Handlers();
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class ResponseHandlers {
+        @Bean
+        Object responses() {
+            return new Object() {
+                @PeppolInvoiceResponseHandler
+                public InboundOutcome response(InvoiceResponse response) {
+                    return InboundOutcome.accepted("SE");
+                }
+            };
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class TypedResponseHandler {
+        @Bean
+        Object typed() {
+            return new Object() {
+                @PeppolInboundHandler(documentType = InvoiceResponseBuilder.DOCUMENT_TYPE_ID)
+                public InboundOutcome response(InboundDocument document) {
+                    return InboundOutcome.accepted("NO");
+                }
+            };
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class WrongResponseSignature {
+        @Bean
+        Object wrongResponse() {
+            return new Object() {
+                @PeppolInvoiceResponseHandler
+                public void response(InvoiceResponse response) {
+                }
+            };
         }
     }
 

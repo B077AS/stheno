@@ -2,8 +2,11 @@ package io.github.b077as.stheno.spring.internal;
 
 import io.github.b077as.stheno.delivery.DeliveryListener;
 import io.github.b077as.stheno.delivery.DeliveryStatus;
+import io.github.b077as.stheno.delivery.ResponseHistory;
 import io.github.b077as.stheno.delivery.TrackedDocument;
+import io.github.b077as.stheno.delivery.TrackedResponse;
 import io.github.b077as.stheno.inbound.ReceivedMls;
+import io.github.b077as.stheno.reply.InvoiceReference;
 import io.github.b077as.stheno.spring.event.SthenoEvents;
 import org.springframework.context.ApplicationEventPublisher;
 
@@ -37,5 +40,20 @@ public class SpringEventDeliveryListener implements DeliveryListener {
     @Override
     public void onIgnored(TrackedDocument document, ReceivedMls ignored) {
         publisher.publishEvent(new SthenoEvents.MlsIgnored(document, ignored));
+    }
+
+    @Override
+    public void onInvoiceResponse(TrackedDocument document, TrackedResponse response, ResponseHistory history) {
+        publisher.publishEvent(new SthenoEvents.InvoiceResponseTracked(document, response, history));
+    }
+
+    @Override
+    public void onResponseOutOfSequence(TrackedDocument document, TrackedResponse response, ResponseHistory history) {
+        publisher.publishEvent(new SthenoEvents.InvoiceResponseOutOfSequence(document, response, history));
+    }
+
+    @Override
+    public void onResponseForUnknownInvoice(InvoiceReference invoice, TrackedResponse response) {
+        publisher.publishEvent(new SthenoEvents.InvoiceResponseForUnknownInvoice(invoice, response));
     }
 }

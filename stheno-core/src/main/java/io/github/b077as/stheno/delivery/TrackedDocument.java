@@ -1,6 +1,7 @@
 package io.github.b077as.stheno.delivery;
 
 import io.github.b077as.stheno.inbound.ReceivedMls;
+import io.github.b077as.stheno.reply.InvoiceReference;
 import lombok.Value;
 
 import java.time.Duration;
@@ -25,6 +26,8 @@ public class TrackedDocument {
     ReceivedMls mls;
     /** When that MLS was recorded. */
     Instant mlsReceivedAt;
+    /** The invoice or credit note in the document, to match Invoice Responses; {@code null} if not registered. */
+    InvoiceReference invoice;
 
     public DeliveryStatus statusAt(Instant now, Duration overdueAfter) {
         if (mls != null) {

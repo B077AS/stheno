@@ -18,7 +18,9 @@ import org.springframework.context.event.EventListener;
  * <li>{@code stheno.ap.acknowledgements} (tag {@code result}: {@code ok} / {@code failed})</li>
  * <li>{@code stheno.ap.rejections.undelivered}</li>
  * <li>delivery tracking: {@code stheno.delivery.decided} (tag {@code status}), {@code stheno.delivery.overdue},
- * {@code stheno.delivery.mls.unknown}, {@code stheno.delivery.mls.ignored} (counted again when an event is published again)</li>
+ * {@code stheno.delivery.mls.unknown}, {@code stheno.delivery.mls.ignored}, {@code stheno.delivery.responses} (tag
+ * {@code status}), {@code stheno.delivery.responses.out-of-sequence}, {@code stheno.delivery.responses.unknown} (counted again when
+ * an event is published again)</li>
  * </ul>
  * Document types are not used as tags (unbounded cardinality).
  */
@@ -74,6 +76,21 @@ public class SthenoMetrics implements InboundListener {
     @EventListener
     public void onMlsIgnored(SthenoEvents.MlsIgnored event) {
         registry.counter("stheno.delivery.mls.ignored").increment();
+    }
+
+    @EventListener
+    public void onInvoiceResponse(SthenoEvents.InvoiceResponseTracked event) {
+        registry.counter("stheno.delivery.responses", "status", event.getResponse().getStatus().name()).increment();
+    }
+
+    @EventListener
+    public void onResponseOutOfSequence(SthenoEvents.InvoiceResponseOutOfSequence event) {
+        registry.counter("stheno.delivery.responses.out-of-sequence").increment();
+    }
+
+    @EventListener
+    public void onResponseForUnknownInvoice(SthenoEvents.InvoiceResponseForUnknownInvoice event) {
+        registry.counter("stheno.delivery.responses.unknown").increment();
     }
 
     @EventListener

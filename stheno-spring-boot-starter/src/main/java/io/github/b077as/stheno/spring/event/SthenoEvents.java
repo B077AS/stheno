@@ -3,13 +3,16 @@ package io.github.b077as.stheno.spring.event;
 import io.github.b077as.stheno.ap.Acknowledgement;
 import io.github.b077as.stheno.ap.ApCallResult;
 import io.github.b077as.stheno.delivery.DeliveryStatus;
+import io.github.b077as.stheno.delivery.ResponseHistory;
 import io.github.b077as.stheno.delivery.TrackedDocument;
+import io.github.b077as.stheno.delivery.TrackedResponse;
 import io.github.b077as.stheno.inbound.HandlingResult;
 import io.github.b077as.stheno.inbound.InboundDocument;
 import io.github.b077as.stheno.inbound.InboundOutcome;
 import io.github.b077as.stheno.inbound.ReceivedMls;
 import io.github.b077as.stheno.inbound.ReceivedRecord;
 import io.github.b077as.stheno.inbound.Reception;
+import io.github.b077as.stheno.reply.InvoiceReference;
 import lombok.Value;
 
 import java.util.List;
@@ -106,6 +109,35 @@ public final class SthenoEvents {
     public static class MlsIgnored {
         TrackedDocument document;
         ReceivedMls ignored;
+    }
+
+    /**
+     * Delivery tracking: an Invoice Response about a sent invoice; {@code history.getStatus()} is the status of the invoice now. May be
+     * published again for the same response.
+     */
+    @Value
+    public static class InvoiceResponseTracked {
+        TrackedDocument document;
+        TrackedResponse response;
+        ResponseHistory history;
+    }
+
+    /**
+     * Delivery tracking: an Invoice Response that does not follow the earlier ones (e.g. "rejected" after "accepted"). The status of
+     * the invoice is unchanged; somebody should look at it.
+     */
+    @Value
+    public static class InvoiceResponseOutOfSequence {
+        TrackedDocument document;
+        TrackedResponse response;
+        ResponseHistory history;
+    }
+
+    /** Delivery tracking: an Invoice Response about an invoice that is not registered (yet). */
+    @Value
+    public static class InvoiceResponseForUnknownInvoice {
+        InvoiceReference invoice;
+        TrackedResponse response;
     }
 
     /** The Access Point was told about a handled document (or the attempt failed, see {@link Acknowledgement#isFailed()}). */

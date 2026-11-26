@@ -3,7 +3,9 @@ package io.github.b077as.stheno.test.app;
 import io.github.b077as.stheno.inbound.InboundDocument;
 import io.github.b077as.stheno.inbound.InboundOutcome;
 import io.github.b077as.stheno.inbound.ReceivedMls;
+import io.github.b077as.stheno.reply.InvoiceResponse;
 import io.github.b077as.stheno.spring.PeppolInboundHandler;
+import io.github.b077as.stheno.spring.PeppolInvoiceResponseHandler;
 import io.github.b077as.stheno.spring.PeppolMlsHandler;
 import io.github.b077as.stheno.spring.event.SthenoEvents;
 import io.github.b077as.stheno.test.FakeAccessPoint;
@@ -16,7 +18,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * A small application using the starter the way a real one would: one handler for BIS 3 invoices, one for MLS answers.
+ * A small application using the starter the way a real one would: handlers for BIS 3 invoices, Invoice Responses and MLS answers.
  */
 @SpringBootApplication
 public class TestApplication {
@@ -35,8 +37,11 @@ public class TestApplication {
         public static final List<ReceivedMls> MLS = new CopyOnWriteArrayList<>();
         public static final List<Object> EVENTS = new CopyOnWriteArrayList<>();
 
+        public static final List<InvoiceResponse> RESPONSES = new CopyOnWriteArrayList<>();
+
         public static void reset() {
             BEHAVIOUR.set(doc -> InboundOutcome.accepted("DK"));
+            RESPONSES.clear();
             INVOICES.clear();
             MLS.clear();
             EVENTS.clear();
@@ -51,6 +56,17 @@ public class TestApplication {
         @PeppolMlsHandler
         public void mls(ReceivedMls mls) {
             MLS.add(mls);
+        }
+
+        @PeppolInvoiceResponseHandler
+        public InboundOutcome response(InvoiceResponse response) {
+            RESPONSES.add(response);
+            return InboundOutcome.accepted("BE");
+        }
+
+        @EventListener
+        public void onEvent(SthenoEvents.InvoiceResponseTracked event) {
+            EVENTS.add(event);
         }
 
         @EventListener

@@ -37,6 +37,8 @@ public class SthenoException extends RuntimeException {
         /** The received message store (e.g. the database) failed. */
         STORE_FAILED,
         /** No handler takes the received document, so it was not taken over. */
-        NO_HANDLER
+        NO_HANDLER,
+        /** A received business document cannot be read as the kind of document its type says (e.g. an Invoice Response). */
+        INVALID_DOCUMENT
     }
 }

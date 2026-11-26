@@ -57,8 +57,34 @@ public final class TestDocs {
         }
     }
 
+    /**
+     * Only the header and the parties of a BIS 3 invoice, with legal names (the peppol-testfiles invoice has none). Not a valid
+     * invoice.
+     */
+    public static Element namedInvoiceElement() {
+        String ubl = "urn:oasis:names:specification:ubl:schema:xsd:";
+        return parse(("<Invoice xmlns='" + ubl + "Invoice-2' xmlns:cac='" + ubl + "CommonAggregateComponents-2' xmlns:cbc='" + ubl
+                + "CommonBasicComponents-2'>"
+                + "<cbc:CustomizationID>urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0</cbc:CustomizationID>"
+                + "<cbc:ID>INV-0001</cbc:ID><cbc:IssueDate>2026-11-15</cbc:IssueDate><cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode>"
+                + "<cac:AccountingSupplierParty><cac:Party><cac:PartyLegalEntity><cbc:RegistrationName>Seller NV</cbc:RegistrationName>"
+                + "</cac:PartyLegalEntity></cac:Party></cac:AccountingSupplierParty>"
+                + "<cac:AccountingCustomerParty><cac:Party><cac:PartyLegalEntity><cbc:RegistrationName>Buyer A/S</cbc:RegistrationName>"
+                + "</cac:PartyLegalEntity></cac:Party></cac:AccountingCustomerParty></Invoice>")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /** An envelope around {@link #namedInvoiceElement()}. */
+    public static BuiltEnvelope namedInvoiceEnvelope(String instanceId) {
+        return envelope(instanceId, namedInvoiceElement());
+    }
+
     /** A complete invoice envelope with the given instance identifier. */
     public static BuiltEnvelope invoiceEnvelope(String instanceId) {
+        return envelope(instanceId, invoiceElement());
+    }
+
+    private static BuiltEnvelope envelope(String instanceId, Element invoice) {
         return EnvelopeBuilder.create()
                 .sender(SENDER)
                 .receiver(RECEIVER)
@@ -66,7 +92,7 @@ public final class TestDocs {
                 .process(BILLING_PROCESS)
                 .senderCountry("BE")
                 .instanceIdentifier(instanceId)
-                .payload(invoiceElement())
+                .payload(invoice)
                 .build();
     }
 

@@ -34,9 +34,12 @@ checks and confirms**; it never transmits documents (it is not an Access Point a
   Status verdict (`AP` / `AB` / `RE` with issues) from which the Access Point builds the MLS.
 - **MLS answers** to documents you sent, parsed, to your `@PeppolMlsHandler`, and a [delivery tracker](#following-what-you-sent)
   that turns them into the status of each document.
+- **Invoice Responses** (T111): the buyer's answers to your invoices, read and handed to your `@PeppolInvoiceResponseHandler`, and
+  [followed per invoice](#what-the-buyer-says-invoice-responses) from "received" to "paid".
 - **Checks**: Peppol identifiers (also as Bean Validation annotations), document validation with the official rule sets, cached
   "can this participant receive this document?" lookups.
-- **Building**: Peppol envelopes (SBDH 2.0.2) and Invoice Responses (T111), to hand to your Access Point yourself.
+- **Building**: Peppol envelopes (SBDH 2.0.2) and Invoice Responses, prefilled from the invoice you answer, to hand to your Access
+  Point yourself.
 - **Testing**: a fake Access Point that behaves like phoss-ap. No certificates, no network.
 
 Built on Philip Helger's peppol-commons, phive and ddd. First supported Access Point: [phoss-ap](https://github.com/phax/phoss-ap)
@@ -164,6 +167,53 @@ tracker.find(instanceIdentifier).map(tracker::statusOf);
 - Events can come more than once: if your listener throws, the MLS is processed again. With background processing that happens
   `handler-retry-attempts` times, so treat `find` as the source of truth.
 
+## What the buyer says: Invoice Responses
+
+The MLS says whether your invoice arrived. A Peppol **Invoice Response** says what the buyer does with it: received, in process,
+under query, conditionally accepted, rejected, accepted, paid. Buyers are not obliged to send one for you to get paid, so no response
+means nothing.
+
+```java
+@PeppolInvoiceResponseHandler
+InboundOutcome response(InvoiceResponse response) {         // optionally also (InvoiceResponse, InboundDocument)
+    notes.add(response.getInvoiceNumber(), response.getStatus(), response.getStatusEntries());
+    return InboundOutcome.accepted("BE");                   // also when the buyer rejected your invoice (RE)
+}
+```
+
+A response is a business document like any other: your handler decides its MLS verdict, and `rejected` is only for technical faults.
+A response that cannot be read counts as a handler failure. At most one such method; without it, responses go to a handler for their
+document type or the one without `documentType`.
+
+With [delivery tracking](#following-what-you-sent) on, Stheno also keeps the responses per invoice:
+
+```java
+tracker.track(envelope);                                    // an envelope you built: the invoice is read from it
+tracker.track(instanceIdentifier, false, InvoiceReference.of(   // or say which invoice it is
+        "0208:0123456749", "0088:5798000000001", "INV-0001", "380", issueDate));
+
+@EventListener
+void answered(SthenoEvents.InvoiceResponseTracked event) {
+    invoices.buyerStatus(event.getDocument().getInstanceIdentifier(), event.getHistory().getStatus());
+}
+
+// Or ask at any time
+tracker.find(instanceIdentifier).map(tracker::responsesTo).map(ResponseHistory::getStatus);
+```
+
+- A response belongs to your invoice if the **invoice number and type code** match, it comes **from the participant you sent the
+  invoice to** and goes to the participant you sent it from, and the invoice dates do not differ (a response may leave the date out).
+  A response from another participant, such as a service provider answering under its own identifier, stays unmatched
+  (`InvoiceResponseForUnknownInvoice`).
+- An invoice can get several responses. They advance in the order `AB`, `IP`, `UQ`, `CA`, `RE`, `AP`, `PD`, not all of which need to
+  occur; `RE` and `PD` are final. A partial payment (`PD` with reason `PPD`) is not.
+- A response that goes backwards or follows a final one (a rejection after "accepted", anything after "paid") does not change the
+  status. It is kept and published as `InvoiceResponseOutOfSequence`: somebody should look at it.
+- Responses are tracked after your handler accepted them, so **you need a handler** (any of the above) even if you only want the
+  tracking. If tracking fails (e.g. database down), the response can be delivered again and your handler is called again.
+- A response that arrives before you registered its invoice is kept and applied by `track`.
+- The delivery status (MLS) and the invoice status (responses) are separate: neither changes the other.
+
 ## When processing is interrupted
 
 With background processing the Access Point gets its `200` before your handler runs, and the document is only held in memory. If the
@@ -230,10 +280,12 @@ a machine client) and protect it with the header above or your own rules. Use HT
 
 - Spring events (`SthenoEvents`): `DocumentReceived`, `DuplicateReceived`, `DocumentHandled`, `HandlerFailed`, `MlsReceived`,
   `AccessPointAcknowledged`, `RejectionNotDelivered`, `DocumentsUnfinished`; with delivery tracking `DeliveryDecided`,
-  `DeliveryOverdue`, `MlsForUnknownDocument`, `MlsIgnored`.
+  `DeliveryOverdue`, `MlsForUnknownDocument`, `MlsIgnored`, `InvoiceResponseTracked`, `InvoiceResponseOutOfSequence`,
+  `InvoiceResponseForUnknownInvoice`.
 - Micrometer: `stheno.inbound.received`, `stheno.inbound.duplicates`, `stheno.inbound.handled{outcome}`,
   `stheno.inbound.handler.failures`, `stheno.ap.acknowledgements{result}`, `stheno.ap.rejections.undelivered`,
-  `stheno.delivery.decided{status}`, `stheno.delivery.overdue`, `stheno.delivery.mls.unknown`, `stheno.delivery.mls.ignored`.
+  `stheno.delivery.decided{status}`, `stheno.delivery.overdue`, `stheno.delivery.mls.unknown`, `stheno.delivery.mls.ignored`,
+  `stheno.delivery.responses{status}`, `stheno.delivery.responses.out-of-sequence`, `stheno.delivery.responses.unknown`.
 - Actuator health `stheno`: handlers, pending documents, switches, `consecutiveAcknowledgementFailures`.
 - Handlers run on virtual threads; define an `Executor` bean named `sthenoInboundExecutor` to use your own.
 
@@ -252,14 +304,24 @@ c.canReceive();
 ValidationReport report = validator.validate(doc);
 report.isValid();                                         // warnings never make a document invalid
 
-// Invoice Response (T111) in an envelope, to hand to your Access Point
-BuiltEnvelope reply = InvoiceResponseBuilder.create()
-        .id("imr-1").sender("0088:5798000000001", "Buyer A/S").receiver("0208:0123456749", "Seller NV")
-        .invoice("INV-0001", "380", null)
+// Answer an invoice you received: an Invoice Response (T111) in an envelope, to hand to your Access Point
+BuiltEnvelope reply = InvoiceResponseBuilder.replyTo(doc)      // participants, names, invoice number, type and date
+        .id("imr-1")
         .status(InvoiceResponseBuilder.Status.RE)
         .reason(InvoiceResponseBuilder.Reason.REF, "Order reference not found")
-        .buildEnvelope("DK");
+        .buildEnvelope("DK");                                  // your country
+
+// Without the invoice document, give everything yourself
+InvoiceResponseBuilder.create()
+        .sender("0088:5798000000001", "Buyer A/S").receiver("0208:0123456749", "Seller NV")
+        .invoice("INV-0001", "380", null);
+
+// Read one outside the inbound flow
+InvoiceResponse response = new InvoiceResponseReader().read(element);
 ```
+
+`replyTo` takes a UBL invoice or credit note and only copies what it says: what is missing is reported by `build`. For self-billed
+documents set the names with `sender` and `receiver`. Check the result with the validator before you send it.
 
 `EnvelopeBuilder` wraps any document (XML, binary or text) in a Peppol envelope; the sender country is required, never defaulted.
 

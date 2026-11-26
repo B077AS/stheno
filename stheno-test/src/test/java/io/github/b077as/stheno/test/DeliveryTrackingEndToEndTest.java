@@ -3,7 +3,12 @@ package io.github.b077as.stheno.test;
 import io.github.b077as.stheno.delivery.DeliveryStatus;
 import io.github.b077as.stheno.delivery.DeliveryTracker;
 import io.github.b077as.stheno.delivery.TrackedDocument;
+import io.github.b077as.stheno.envelope.BuiltEnvelope;
+import io.github.b077as.stheno.envelope.EnvelopeReader;
+import io.github.b077as.stheno.inbound.InboundDocument;
 import io.github.b077as.stheno.inbound.MlsIssue;
+import io.github.b077as.stheno.reply.InvoiceResponse;
+import io.github.b077as.stheno.reply.InvoiceResponseBuilder;
 import io.github.b077as.stheno.spring.event.SthenoEvents;
 import io.github.b077as.stheno.test.app.TestApplication;
 import io.github.b077as.stheno.test.app.TestApplication.Handlers;
@@ -84,6 +89,29 @@ class DeliveryTrackingEndToEndTest {
 
         TrackedDocument tracked = tracker.track(id, true);
         assertThat(tracker.statusOf(tracked)).isEqualTo(DeliveryStatus.CONFIRMED);
+    }
+
+    @Test
+    void theBuyersInvoiceResponseReachesTheHandlerAndTheSentInvoice() {
+        BuiltEnvelope sent = FakeAccessPoint.sampleInvoiceEnvelope();
+        tracker.track(sent);
+        InboundDocument asTheBuyerSeesIt = new EnvelopeReader().read(sent.getXml(), null);
+        BuiltEnvelope response = InvoiceResponseBuilder.replyTo(asTheBuyerSeesIt)
+                .id("imr-" + UUID.randomUUID())
+                .status(InvoiceResponseBuilder.Status.UQ)
+                .reason(InvoiceResponseBuilder.Reason.REF, "Which order is this?")
+                .buildEnvelope("DK");
+
+        assertThat(AP.deliver(response).getStatus()).isEqualTo(200);
+
+        assertThat(AP.awaitMlsVerdict(response.getInstanceIdentifier(), WAIT).isAccepted()).isTrue();
+        waitUntil(() -> Handlers.EVENTS.stream().anyMatch(e -> e instanceof SthenoEvents.InvoiceResponseTracked t
+                && t.getDocument().getInstanceIdentifier().equals(sent.getInstanceIdentifier())
+                && t.getHistory().getStatus() == InvoiceResponseBuilder.Status.UQ));
+        assertThat(Handlers.RESPONSES).singleElement().extracting(InvoiceResponse::getInvoiceNumber).isEqualTo("INV-0001");
+        assertThat(Handlers.INVOICES).isEmpty();
+        assertThat(tracker.responsesTo(tracker.find(sent.getInstanceIdentifier()).orElseThrow()).getCurrent().getStatusEntries())
+                .singleElement().extracting(InvoiceResponseBuilder.StatusEntry::getText).isEqualTo("Which order is this?");
     }
 
     private DeliveryStatus status(String id) {
